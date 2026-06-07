@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kito Help</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <main class="panel">
+      <header class="panel-header">
+        <img src="public/2-cutout.png" alt="" />
+        <div>
+          <div class="eyebrow">Kito Coach</div>
+          <h1>Need help here?</h1>
+        </div>
+      </header>
+
+      <nav class="tabs" aria-label="Kito help tabs">
+        <button class="tab active" type="button" data-tab="Explain">Explain</button>
+        <button class="tab" type="button" data-tab="Official Docs">Official Docs</button>
+        <button class="tab" type="button" data-tab="Claude Prompt">Claude Prompt</button>
+      </nav>
+
+      <section id="content" class="content" aria-live="polite"></section>
+    </main>
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>

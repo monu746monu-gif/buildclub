@@ -5,10 +5,33 @@ const originalTextByNode = new Map();
 const widgetId = "buildclub-academy-helper";
 const courseMemoryKey = "buildclubCourseMemory";
 const profileMemoryKey = "_profile";
+const stuckHelpBubbleId = "kito-stuck-help-bubble";
+const stuckZoneSize = 400;
+const sameZonePauseMs = 60000;
+const repeatedScrollWindowMs = 20000;
+const repeatedScrollDirectionChanges = 4;
+const kitoSnoozeMs = 10 * 60 * 1000;
+const MESSAGE_TYPES = {
+  STUCK_DETECTED: "STUCK_DETECTED",
+  TEXT_SELECTED: "TEXT_SELECTED",
+  OPEN_KITO_PANEL: "OPEN_KITO_PANEL",
+  OPEN_SIDE_PANEL_TAB: "OPEN_SIDE_PANEL_TAB",
+  SAVE_STUCK_CONTEXT: "SAVE_STUCK_CONTEXT"
+};
 let hasShownBuildPrompt = false;
 let selectedProjectIdea = "";
 let isVoiceEnabled = true;
 let activeVoiceUtterance = null;
+let currentScrollZone = Math.floor(window.scrollY / stuckZoneSize);
+let currentZoneEnteredAt = Date.now();
+let lastScrollY = window.scrollY;
+let lastScrollDirection = 0;
+let scrollDirectionChanges = [];
+let lastSelectedText = "";
+let latestStuckContext = null;
+let latestRequestedSidePanelTab = "Explain";
+let sameZoneTimer = null;
+let codePauseTimer = null;
 
 const blockedTags = new Set([
   "SCRIPT",
@@ -404,7 +427,11 @@ function setBubbleContent(widget, html, { speak = true } = {}) {
   const bubble = widget.querySelector(".kito-bubble");
   if (!bubble) return;
 
+  widget.classList.remove("message-hidden");
   bubble.innerHTML = html;
+  bubble.querySelector("[data-action='show-quiz']")?.addEventListener("click", () => {
+    renderWidgetState(widget, "quiz");
+  });
   if (speak) {
     speakKitoText(getSpeakableText(bubble));
   }
@@ -646,6 +673,327 @@ function storageSet(value) {
   });
 }
 
+async function sendRuntimeMessage(message) {
+  if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) {
+    return null;
+  }
+
+  try {
+    return await chrome.runtime.sendMessage(message);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function getStuckSectionKey(context) {
+  const headingKey = context.nearestHeading || "no-heading";
+  const zoneKey = Math.floor(context.scrollY / stuckZoneSize);
+  return `${context.url}::${headingKey}::${zoneKey}`;
+}
+
+async function saveStuckContext(context) {
+  latestStuckContext = context;
+  const stored = await storageGet(["stuckHistory"]);
+  const stuckHistory = stored.stuckHistory || {};
+  const urlHistory = stuckHistory[context.url] || [];
+  const nextHistory = {
+    ...stuckHistory,
+    [context.url]: [context, ...urlHistory].slice(0, 20)
+  };
+
+  await storageSet({
+    latestStuckContext: context,
+    stuckHistory: nextHistory
+  });
+  await sendRuntimeMessage({ type: MESSAGE_TYPES.SAVE_STUCK_CONTEXT, context });
+}
+
+async function isStuckInteractionAllowed(context) {
+  const stored = await storageGet(["kitoSnoozeUntil", "dismissedSectionKeys"]);
+  if ((stored.kitoSnoozeUntil || 0) > Date.now()) {
+    return false;
+  }
+
+  const dismissedKeys = new Set(stored.dismissedSectionKeys || []);
+  return !dismissedKeys.has(getStuckSectionKey(context));
+}
+
+function getVisibleElementNearViewportCenter() {
+  const x = Math.max(12, Math.min(window.innerWidth - 12, Math.floor(window.innerWidth / 2)));
+  const sampleYs = [
+    Math.floor(window.innerHeight * 0.35),
+    Math.floor(window.innerHeight * 0.5),
+    Math.floor(window.innerHeight * 0.65)
+  ];
+
+  for (const y of sampleYs) {
+    const element = document.elementFromPoint(x, y);
+    if (element && !element.closest(`#${widgetId}, #${stuckHelpBubbleId}`)) {
+      return element;
+    }
+  }
+
+  return document.body;
+}
+
+function getNearestHeadingFromElement(element) {
+  let current = element;
+  while (current && current !== document.body) {
+    const previousHeading = findPreviousHeading(current);
+    if (previousHeading) return previousHeading.textContent.trim();
+    current = current.parentElement;
+  }
+
+  const firstHeading = document.querySelector("h1, h2, h3");
+  return firstHeading?.textContent?.trim() || "";
+}
+
+function findPreviousHeading(element) {
+  let current = element;
+  while (current) {
+    let sibling = current.previousElementSibling;
+    while (sibling) {
+      if (/^H[1-6]$/.test(sibling.tagName) && sibling.textContent.trim()) {
+        return sibling;
+      }
+
+      const nestedHeading = sibling.querySelector?.("h1, h2, h3, h4, h5, h6");
+      if (nestedHeading?.textContent?.trim()) {
+        return nestedHeading;
+      }
+      sibling = sibling.previousElementSibling;
+    }
+    current = current.parentElement;
+  }
+
+  return null;
+}
+
+function getNearbyTextFromElement(element) {
+  const container = element?.closest?.("article, section, main, [data-mdx-content], [class*='content'], [class*='lesson'], [class*='course']") || element || document.body;
+  return (container.textContent || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 1400);
+}
+
+function hasVisibleCodeBlockNearViewport() {
+  const codeSelectors = "pre, code, .code, [class*='code'], [class*='Code']";
+  const viewportTop = window.scrollY;
+  const viewportBottom = viewportTop + window.innerHeight;
+
+  return [...document.querySelectorAll(codeSelectors)].some((element) => {
+    if (element.closest(`#${widgetId}, #${stuckHelpBubbleId}`)) return false;
+    const rect = element.getBoundingClientRect();
+    const top = rect.top + window.scrollY;
+    const bottom = rect.bottom + window.scrollY;
+    return bottom >= viewportTop - 120 && top <= viewportBottom + 120 && rect.width > 0 && rect.height > 0;
+  });
+}
+
+function buildStuckContext(triggerReason, selectedText = "") {
+  const visibleElement = getVisibleElementNearViewportCenter();
+  const hasCodeBlock = hasVisibleCodeBlockNearViewport();
+  const nearbyText = getNearbyTextFromElement(visibleElement);
+  const nearestHeading = getNearestHeadingFromElement(visibleElement);
+
+  return {
+    url: window.location.href,
+    title: document.title || "",
+    selectedText: selectedText || undefined,
+    nearbyText,
+    nearestHeading: nearestHeading || undefined,
+    hasCodeBlock,
+    triggerReason,
+    scrollY: window.scrollY,
+    timestamp: Date.now()
+  };
+}
+
+function injectStuckHelpBubbleStyle() {
+  if (document.getElementById(`${stuckHelpBubbleId}-style`)) return;
+
+  const style = document.createElement("style");
+  style.id = `${stuckHelpBubbleId}-style`;
+  style.textContent = `
+    #${stuckHelpBubbleId} {
+      position: fixed;
+      right: 24px;
+      bottom: 140px;
+      z-index: 2147483647;
+      width: 260px;
+      border: 1px solid rgba(95, 151, 35, 0.46);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.94);
+      color: #102014;
+      box-shadow: 0 18px 44px rgba(16, 32, 20, 0.22);
+      padding: 12px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      pointer-events: auto;
+      animation: kito-stuck-pop 180ms ease-out;
+    }
+
+    #${stuckHelpBubbleId} .kito-stuck-title {
+      font-size: 15px;
+      font-weight: 950;
+      line-height: 1.2;
+    }
+
+    #${stuckHelpBubbleId} .kito-stuck-hint {
+      margin-top: 4px;
+      color: #536746;
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 1.35;
+    }
+
+    #${stuckHelpBubbleId} .kito-stuck-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 7px;
+      margin-top: 10px;
+    }
+
+    #${stuckHelpBubbleId} button {
+      min-width: 0;
+      border: 0;
+      border-radius: 8px;
+      background: #102014;
+      color: #c8ea5a;
+      padding: 8px 7px;
+      font: inherit;
+      font-size: 11px;
+      font-weight: 950;
+      line-height: 1.1;
+      cursor: pointer;
+    }
+
+    #${stuckHelpBubbleId} button[data-action="kito-ignore"] {
+      border: 1px solid rgba(95, 151, 35, 0.34);
+      background: #f5f8ed;
+      color: #28441e;
+    }
+
+    @media (max-width: 520px) {
+      #${stuckHelpBubbleId} {
+        right: 12px;
+        bottom: 122px;
+        width: min(232px, calc(100vw - 24px));
+        padding: 10px;
+      }
+    }
+
+    @keyframes kito-stuck-pop {
+      from { opacity: 0; transform: translateY(8px) scale(.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+function showOpenKitoFallbackBubble() {
+  injectStuckHelpBubbleStyle();
+  const bubble = document.getElementById(stuckHelpBubbleId) || document.createElement("div");
+  bubble.id = stuckHelpBubbleId;
+  bubble.innerHTML = `
+    <div class="kito-stuck-title">Click Kito to open help.</div>
+    <div class="kito-stuck-hint">Chrome wants a direct click before opening the side panel.</div>
+  `;
+  if (!bubble.parentElement) document.body.appendChild(bubble);
+}
+
+async function openKitoPanel(tab) {
+  latestRequestedSidePanelTab = tab;
+  await storageSet({ latestRequestedSidePanelTab: tab });
+  const response = await sendRuntimeMessage({ type: MESSAGE_TYPES.OPEN_SIDE_PANEL_TAB, tab });
+  if (!response?.opened) {
+    showOpenKitoFallbackBubble();
+  }
+}
+
+async function handleStuckBubbleAction(action) {
+  if (!latestStuckContext) return;
+
+  if (action === "kito-ignore") {
+    const stored = await storageGet(["dismissedSectionKeys"]);
+    const dismissedSectionKeys = new Set(stored.dismissedSectionKeys || []);
+    dismissedSectionKeys.add(getStuckSectionKey(latestStuckContext));
+    await storageSet({
+      kitoSnoozeUntil: Date.now() + kitoSnoozeMs,
+      dismissedSectionKeys: [...dismissedSectionKeys]
+    });
+    document.getElementById(stuckHelpBubbleId)?.remove();
+    return;
+  }
+
+  const tabByAction = {
+    "kito-explain": "Explain",
+    "kito-docs": "Official Docs",
+    "kito-prompt": "Claude Prompt"
+  };
+  const tab = tabByAction[action] || "Explain";
+  await saveStuckContext(latestStuckContext);
+  await openKitoPanel(tab);
+}
+
+function showStuckHelpBubble(context) {
+  injectStuckHelpBubbleStyle();
+  let bubble = document.getElementById(stuckHelpBubbleId);
+  if (!bubble) {
+    bubble = document.createElement("div");
+    bubble.id = stuckHelpBubbleId;
+    document.body.appendChild(bubble);
+  }
+
+  bubble.innerHTML = `
+    <div class="kito-stuck-title">Need help here?</div>
+    <div class="kito-stuck-hint">${escapeHtml(context.nearestHeading || "Kito noticed this section might need a closer look.")}</div>
+    <div class="kito-stuck-actions">
+      <button type="button" data-action="kito-explain">Explain</button>
+      <button type="button" data-action="kito-docs">Official Docs</button>
+      <button type="button" data-action="kito-prompt">Claude Prompt</button>
+      <button type="button" data-action="kito-ignore">Ignore</button>
+    </div>
+  `;
+
+  bubble.querySelectorAll("button[data-action]").forEach((button) => {
+    button.addEventListener("click", () => handleStuckBubbleAction(button.dataset.action));
+  });
+}
+
+async function triggerStuckDetected(triggerReason, selectedText = "") {
+  const context = buildStuckContext(triggerReason, selectedText);
+  const allowed = await isStuckInteractionAllowed(context);
+  if (!allowed) return;
+
+  await saveStuckContext(context);
+  showStuckHelpBubble(context);
+}
+
+function resetSameZoneTimer() {
+  if (sameZoneTimer) {
+    window.clearTimeout(sameZoneTimer);
+  }
+
+  sameZoneTimer = window.setTimeout(() => {
+    triggerStuckDetected("same-section-pause");
+  }, sameZonePauseMs);
+}
+
+function resetCodePauseTimer() {
+  if (codePauseTimer) {
+    window.clearTimeout(codePauseTimer);
+  }
+
+  if (!hasVisibleCodeBlockNearViewport()) return;
+
+  codePauseTimer = window.setTimeout(() => {
+    if (hasVisibleCodeBlockNearViewport()) {
+      triggerStuckDetected("code-block-pause");
+    }
+  }, sameZonePauseMs);
+}
+
 function slugToTitle(value) {
   return value
     .replace(/[-_]+/g, " ")
@@ -764,25 +1112,67 @@ function showProgressCardModal({ tier, progress }) {
   const label = getTierLabel(tier);
   const shareText = getShareProgressText(progress, tier);
   const hasAward = tier !== "none";
+  const tierTheme = {
+    none: {
+      className: "tier-none",
+      code: "PROGRESS",
+      emoji: "✦"
+    },
+    bronze: {
+      className: "tier-bronze",
+      code: "BRONZE",
+      emoji: "◆"
+    },
+    silver: {
+      className: "tier-silver",
+      code: "SILVER",
+      emoji: "◇"
+    },
+    gold: {
+      className: "tier-gold",
+      code: "GOLD",
+      emoji: "★"
+    }
+  }[tier] ?? {
+    className: "tier-none",
+    code: "PROGRESS",
+    emoji: "✦"
+  };
   const modal = document.createElement("div");
   modal.id = "buildclub-progress-card-modal";
   modal.innerHTML = `
     <div class="bc-card-backdrop" data-card-close="true"></div>
-    <section class="bc-earned-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(label)}">
+    <section class="bc-earned-card ${tierTheme.className}" role="dialog" aria-modal="true" aria-label="${escapeHtml(label)}">
       <button class="bc-card-close" data-card-close="true" aria-label="Close card">×</button>
+      <div class="bc-card-pattern"></div>
       <div class="bc-card-shine"></div>
-      <div class="bc-card-kicker">${hasAward ? "Congrats, you got card" : "Your progress card"}</div>
-      <h2>${escapeHtml(label)}</h2>
+      <div class="bc-card-topline">
+        <div>
+          <div class="bc-card-kicker">${hasAward ? "Congrats, you got card" : "Your progress card"}</div>
+          <h2>${escapeHtml(label)}</h2>
+        </div>
+        <div class="bc-tier-badge">
+          <span>${tierTheme.emoji}</span>
+          <strong>${tierTheme.code}</strong>
+        </div>
+      </div>
       <p class="bc-card-copy">Kito analyzed your BuildClub progress. Keep completing courses and projects to move closer to the Gold Card.</p>
       <div class="bc-card-stats">
-        <div><strong>${progress.completedLessons}</strong><span>Lessons</span></div>
-        <div><strong>${progress.completedCourses}</strong><span>Courses</span></div>
-        <div><strong>${progress.projectCount}</strong><span>Projects</span></div>
+        <div><span>Lessons</span><strong>${progress.completedLessons}</strong></div>
+        <div><span>Courses</span><strong>${progress.completedCourses}</strong></div>
+        <div><span>Projects</span><strong>${progress.projectCount}</strong></div>
+      </div>
+      <div class="bc-progress-row">
+        <span>Gold Card</span>
+        <strong>${progress.goldPercent}%</strong>
       </div>
       <div class="bc-gold-progress" aria-label="Gold card progress">
         <span style="width: ${progress.goldPercent}%"></span>
       </div>
-      <div class="bc-card-meta">${progress.goldPercent}% toward Gold Card</div>
+      <div class="bc-card-footer">
+        <span>BuildClub Builder Pass</span>
+        <span>#${String(progress.completedLessons + progress.projectCount + 1).padStart(4, "0")}</span>
+      </div>
       <button class="bc-card-share" data-share-progress="${escapeHtml(shareText)}">Share progress</button>
       <div class="bc-card-status" aria-live="polite"></div>
     </section>
@@ -803,30 +1193,64 @@ function showProgressCardModal({ tier, progress }) {
     #buildclub-progress-card-modal .bc-card-backdrop {
       position: absolute;
       inset: 0;
-      background: rgba(8, 18, 11, 0.46);
-      backdrop-filter: blur(10px);
+      background:
+        radial-gradient(circle at 50% 30%, rgba(200, 234, 90, 0.22), transparent 34%),
+        rgba(8, 18, 11, 0.58);
+      backdrop-filter: blur(12px);
     }
 
     #buildclub-progress-card-modal .bc-earned-card {
       position: relative;
-      width: min(420px, calc(100vw - 32px));
+      width: min(460px, calc(100vw - 32px));
       overflow: hidden;
-      border: 2px solid ${tier === "gold" ? "#d8ad2f" : tier === "silver" ? "#aeb8bb" : "#9f6c2f"};
-      border-radius: 18px;
+      border: 1px solid rgba(255, 255, 255, 0.52);
+      border-radius: 24px;
       background:
-        linear-gradient(145deg, rgba(255, 255, 255, 0.88), rgba(231, 248, 167, 0.76)),
-        #ffffff;
-      padding: 28px;
-      box-shadow: 0 30px 90px rgba(0, 0, 0, 0.28);
+        linear-gradient(145deg, rgba(255, 255, 255, 0.92), rgba(227, 249, 151, 0.82)),
+        #f8ffe8;
+      padding: 26px;
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.82),
+        0 30px 90px rgba(0, 0, 0, 0.34);
+    }
+
+    #buildclub-progress-card-modal .bc-earned-card.tier-bronze {
+      background:
+        linear-gradient(145deg, rgba(255, 255, 255, 0.92), rgba(224, 171, 103, 0.36)),
+        #fff6e9;
+    }
+
+    #buildclub-progress-card-modal .bc-earned-card.tier-silver {
+      background:
+        linear-gradient(145deg, rgba(255, 255, 255, 0.95), rgba(179, 198, 202, 0.48)),
+        #f5fbfc;
+    }
+
+    #buildclub-progress-card-modal .bc-earned-card.tier-gold {
+      background:
+        linear-gradient(145deg, rgba(255, 255, 255, 0.9), rgba(249, 211, 88, 0.58)),
+        #fff7cb;
+    }
+
+    #buildclub-progress-card-modal .bc-card-pattern {
+      position: absolute;
+      inset: 0;
+      opacity: 0.42;
+      background-image:
+        radial-gradient(circle at 24px 24px, rgba(16, 32, 20, 0.12) 2px, transparent 2px),
+        linear-gradient(135deg, transparent 0 42%, rgba(255, 255, 255, 0.34) 42% 58%, transparent 58%);
+      background-size: 34px 34px, 100% 100%;
+      pointer-events: none;
     }
 
     #buildclub-progress-card-modal .bc-card-shine {
       position: absolute;
-      inset: -120px auto auto -70px;
-      width: 220px;
-      height: 320px;
-      transform: rotate(26deg);
-      background: rgba(255, 255, 255, 0.52);
+      inset: -90px -70px auto auto;
+      width: 240px;
+      height: 260px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.58);
+      filter: blur(4px);
     }
 
     #buildclub-progress-card-modal .bc-card-close {
@@ -844,6 +1268,14 @@ function showProgressCardModal({ tier, progress }) {
       font-size: 20px;
     }
 
+    #buildclub-progress-card-modal .bc-card-topline {
+      position: relative;
+      display: flex;
+      gap: 18px;
+      align-items: flex-start;
+      justify-content: space-between;
+    }
+
     #buildclub-progress-card-modal .bc-card-kicker {
       position: relative;
       color: #4c6b24;
@@ -856,8 +1288,38 @@ function showProgressCardModal({ tier, progress }) {
     #buildclub-progress-card-modal h2 {
       position: relative;
       margin: 10px 0 0;
-      font-size: 34px;
-      line-height: 1;
+      max-width: 280px;
+      color: #102014;
+      font-size: 38px;
+      line-height: 0.95;
+    }
+
+    #buildclub-progress-card-modal .bc-tier-badge {
+      display: grid;
+      place-items: center;
+      min-width: 86px;
+      border: 1px solid rgba(16, 32, 20, 0.18);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.62);
+      padding: 12px 10px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+    }
+
+    #buildclub-progress-card-modal .bc-tier-badge span {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 999px;
+      background: #102014;
+      color: #c8ea5a;
+      font-size: 18px;
+    }
+
+    #buildclub-progress-card-modal .bc-tier-badge strong {
+      margin-top: 7px;
+      font-size: 10px;
+      letter-spacing: 0.9px;
     }
 
     #buildclub-progress-card-modal .bc-card-copy {
@@ -872,62 +1334,86 @@ function showProgressCardModal({ tier, progress }) {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
       gap: 10px;
-      margin-top: 20px;
+      margin-top: 22px;
     }
 
     #buildclub-progress-card-modal .bc-card-stats div {
       border: 1px solid rgba(95, 151, 35, 0.34);
-      border-radius: 12px;
-      background: rgba(255, 255, 255, 0.64);
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.58);
       padding: 12px;
-      text-align: center;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
     }
 
     #buildclub-progress-card-modal .bc-card-stats strong {
       display: block;
-      font-size: 24px;
+      margin-top: 5px;
+      font-size: 28px;
+      line-height: 1;
     }
 
     #buildclub-progress-card-modal .bc-card-stats span,
-    #buildclub-progress-card-modal .bc-card-meta,
+    #buildclub-progress-card-modal .bc-progress-row,
+    #buildclub-progress-card-modal .bc-card-footer,
     #buildclub-progress-card-modal .bc-card-status {
       color: #4c6b24;
       font-size: 12px;
       font-weight: 850;
     }
 
+    #buildclub-progress-card-modal .bc-progress-row {
+      position: relative;
+      display: flex;
+      justify-content: space-between;
+      margin-top: 20px;
+      color: #102014;
+    }
+
     #buildclub-progress-card-modal .bc-gold-progress {
       position: relative;
-      height: 12px;
-      margin-top: 20px;
+      height: 14px;
+      margin-top: 8px;
       overflow: hidden;
       border-radius: 999px;
-      background: rgba(16, 32, 20, 0.12);
+      border: 1px solid rgba(16, 32, 20, 0.12);
+      background: rgba(16, 32, 20, 0.1);
     }
 
     #buildclub-progress-card-modal .bc-gold-progress span {
       display: block;
       height: 100%;
       border-radius: inherit;
-      background: linear-gradient(90deg, #c8ea5a, #d8ad2f);
+      background: linear-gradient(90deg, #c8ea5a, #f2ca44, #d8ad2f);
     }
 
-    #buildclub-progress-card-modal .bc-card-meta {
+    #buildclub-progress-card-modal .bc-card-footer {
       position: relative;
-      margin-top: 8px;
+      display: flex;
+      justify-content: space-between;
+      margin-top: 18px;
+      border-top: 1px solid rgba(16, 32, 20, 0.12);
+      padding-top: 12px;
+      color: #102014;
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
     }
 
     #buildclub-progress-card-modal .bc-card-share {
       position: relative;
       width: 100%;
-      margin-top: 18px;
+      margin-top: 20px;
       border: 0;
-      border-radius: 12px;
+      border-radius: 14px;
       background: #102014;
       color: #c8ea5a;
-      padding: 12px 14px;
+      padding: 14px;
       font-weight: 950;
       cursor: pointer;
+      box-shadow: 0 14px 30px rgba(16, 32, 20, 0.18);
+    }
+
+    #buildclub-progress-card-modal .bc-card-share:hover {
+      transform: translateY(-1px);
     }
 
     #buildclub-progress-card-modal .bc-card-status {
@@ -1056,12 +1542,24 @@ function renderWidgetState(widget, state) {
 
   if (state === "ready") {
     setBubbleContent(widget, `
-      <div class="kito-message">You finished the lesson. Let me quickly check what you caught before we start building.</div>
+      <div class="kito-message">You finished the lesson. I made a quick summary for you first.</div>
       <div class="kito-review">
         <div class="review-title">Page Summary</div>
         <ul class="review-list">
           ${review.summary.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
         </ul>
+      </div>
+      <button class="kito-primary" data-action="show-quiz">Take quick quiz</button>
+      <button class="kito-secondary" data-action="download-notes-pdf">Download completed notes PDF</button>
+      <button class="kito-secondary" data-action="show-translate">Translate page</button>
+    `);
+    return;
+  }
+
+  if (state === "quiz") {
+    setBubbleContent(widget, `
+      <div class="kito-message">Now try this quick quiz to check what you caught.</div>
+      <div class="kito-review">
         <div class="review-title">Quick Quiz</div>
         <div class="review-questions">
           ${review.questions.map((question, questionIndex) => `
@@ -1080,8 +1578,8 @@ function renderWidgetState(widget, state) {
         </div>
       </div>
       <button class="kito-primary" data-action="review-done">I caught up - start building</button>
+      <button class="kito-secondary" data-action="review-current">Back to summary</button>
       <button class="kito-secondary" data-action="download-notes-pdf">Download completed notes PDF</button>
-      <button class="kito-secondary" data-action="show-translate">Translate page</button>
     `);
     return;
   }
@@ -1142,7 +1640,8 @@ function createBuildClubWidget({ toggle = true } = {}) {
   const existing = document.getElementById(widgetId);
   if (existing) {
     if (toggle) {
-      existing.remove();
+      existing.classList.remove("message-hidden");
+      speakKitoText(getSpeakableText(existing));
     }
     return;
   }
@@ -1158,7 +1657,6 @@ function createBuildClubWidget({ toggle = true } = {}) {
         <div class="kito-message">Hey, I am Kito. Open the course and read along. I will come back when you finish.</div>
       </div>
       <button class="kito-voice" type="button" aria-label="Mute Kito voice">🔊</button>
-      <button class="bc-close" aria-label="Close BuildClub helper">×</button>
     </div>
   `;
 
@@ -1224,6 +1722,10 @@ function createBuildClubWidget({ toggle = true } = {}) {
       font-weight: 800;
       line-height: 1.25;
       pointer-events: auto;
+    }
+
+    #${widgetId}.message-hidden .kito-bubble {
+      display: none;
     }
 
     #${widgetId} .kito-bubble::after {
@@ -1531,8 +2033,7 @@ function createBuildClubWidget({ toggle = true } = {}) {
       width: min(310px, calc(100vw - 36px));
     }
 
-    #${widgetId} .kito-voice,
-    #${widgetId} .bc-close {
+    #${widgetId} .kito-voice {
       position: absolute;
       top: 0;
       display: grid;
@@ -1551,16 +2052,11 @@ function createBuildClubWidget({ toggle = true } = {}) {
     }
 
     #${widgetId} .kito-voice {
-      right: 30px;
+      right: 0;
       font-size: 13px;
     }
 
-    #${widgetId} .bc-close {
-      right: 0;
-    }
-
-    #${widgetId} .kito-voice:hover,
-    #${widgetId} .bc-close:hover {
+    #${widgetId} .kito-voice:hover {
       background: #1f3d16;
     }
 
@@ -1589,6 +2085,21 @@ function createBuildClubWidget({ toggle = true } = {}) {
   widget.querySelector(".kito-img")?.addEventListener("error", (event) => {
     event.currentTarget.src = fallbackImage;
   });
+  widget.querySelector(".kito-img")?.addEventListener("click", () => {
+    if (latestStuckContext) {
+      document.getElementById(stuckHelpBubbleId)?.remove();
+      openKitoPanel(latestRequestedSidePanelTab);
+      return;
+    }
+
+    const isHidden = widget.classList.toggle("message-hidden");
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+    if (!isHidden) {
+      speakKitoText(getSpeakableText(widget));
+    }
+  });
   updateVoiceButton(widget);
   widget.querySelector(".kito-voice")?.addEventListener("click", () => {
     isVoiceEnabled = !isVoiceEnabled;
@@ -1600,14 +2111,9 @@ function createBuildClubWidget({ toggle = true } = {}) {
       speakKitoText(getSpeakableText(widget));
     }
   });
-  widget.querySelector(".bc-close")?.addEventListener("click", () => {
-    if ("speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-    }
-    widget.remove();
-  });
   widget.addEventListener("click", async (event) => {
-    const button = event.target.closest("button[data-action]");
+    const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+    const button = target?.closest("button[data-action]");
     if (!button) return;
 
     const action = button.dataset.action;
@@ -1657,6 +2163,11 @@ function createBuildClubWidget({ toggle = true } = {}) {
       const message = isCorrect ? "Correct. Nice catch." : "Not quite. The highlighted option is the best answer.";
       if (feedback) feedback.textContent = message;
       speakKitoText(message);
+      return;
+    }
+
+    if (action === "show-quiz") {
+      renderWidgetState(widget, "quiz");
       return;
     }
 
@@ -1767,6 +2278,45 @@ function trackReadingProgress() {
   }
 }
 
+function trackStuckScrollSignals() {
+  const scrollY = window.scrollY;
+  const nextZone = Math.floor(scrollY / stuckZoneSize);
+  const delta = scrollY - lastScrollY;
+  const nextDirection = delta === 0 ? lastScrollDirection : delta > 0 ? 1 : -1;
+  const now = Date.now();
+
+  if (nextZone !== currentScrollZone) {
+    currentScrollZone = nextZone;
+    currentZoneEnteredAt = now;
+    scrollDirectionChanges = scrollDirectionChanges.filter((change) => now - change.timestamp <= repeatedScrollWindowMs);
+    resetSameZoneTimer();
+    resetCodePauseTimer();
+  }
+
+  if (nextDirection && lastScrollDirection && nextDirection !== lastScrollDirection) {
+    scrollDirectionChanges.push({ timestamp: now, zone: currentScrollZone });
+    scrollDirectionChanges = scrollDirectionChanges.filter((change) => now - change.timestamp <= repeatedScrollWindowMs);
+    const nearbyChanges = scrollDirectionChanges.filter((change) => Math.abs(change.zone - currentScrollZone) <= 1);
+    if (nearbyChanges.length >= repeatedScrollDirectionChanges) {
+      scrollDirectionChanges = [];
+      triggerStuckDetected("repeated-scroll");
+    }
+  }
+
+  lastScrollY = scrollY;
+  lastScrollDirection = nextDirection;
+}
+
+function trackSelectionSignal() {
+  const selectedText = String(window.getSelection()?.toString() || "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (selectedText.length <= 20 || selectedText === lastSelectedText) return;
+  lastSelectedText = selectedText;
+  triggerStuckDetected("text-selected", selectedText);
+}
+
 function shouldTranslateNode(node) {
   const parent = node.parentElement;
   if (!parent || blockedTags.has(parent.tagName)) return false;
@@ -1863,10 +2413,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === MESSAGE_TYPES.OPEN_KITO_PANEL || message.type === MESSAGE_TYPES.OPEN_SIDE_PANEL_TAB) {
+    openKitoPanel(message.tab || latestRequestedSidePanelTab);
+    sendResponse({ requested: true });
+    return true;
+  }
+
   return false;
 });
 
 window.addEventListener("scroll", trackReadingProgress, { passive: true });
+window.addEventListener("scroll", trackStuckScrollSignals, { passive: true });
+document.addEventListener("selectionchange", trackSelectionSignal);
 createBuildClubWidget({ toggle: false });
+resetSameZoneTimer();
+resetCodePauseTimer();
 trackReadingProgress();
 }

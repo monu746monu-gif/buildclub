@@ -3,7 +3,13 @@
   "name": "BuildClub Basic Extension",
   "version": "0.0.1",
   "description": "A BuildClub course helper that turns lessons into notes, quizzes, and build ideas.",
-  "permissions": ["activeTab", "scripting", "storage"],
+  "permissions": ["activeTab", "scripting", "storage", "sidePanel", "tabs"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
   "content_scripts": [
     {
       "matches": ["https://buildclub.ai/*", "https://*.buildclub.ai/*"],

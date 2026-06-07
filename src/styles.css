@@ -9,3 +9,290 @@
 body {
   margin: 0;
 }
+
+body {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.brand-lockup {
+  transform: translateZ(0);
+}
+
+.brand-mark {
+  animation: brand-float 4s ease-in-out infinite;
+  overflow: visible;
+}
+
+.brand-mark::after {
+  content: "";
+  position: absolute;
+  inset: -5px;
+  border: 2px solid rgba(200, 234, 90, 0.78);
+  border-radius: 22px;
+  opacity: 0;
+  transform: scale(0.88);
+  animation: brand-pulse 2.8s ease-out infinite;
+}
+
+.brand-name {
+  color: #315f16;
+  background: linear-gradient(90deg, #234816, #5f9723 45%, #234816);
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  text-shadow: 0 12px 24px rgba(49, 95, 22, 0.12);
+  animation: brand-text-sheen 3.4s ease-in-out infinite;
+}
+
+.brand-lockup:hover .brand-name {
+  animation-duration: 1.7s;
+}
+
+.hero-headline {
+  font-family: "Avenir Next", "SF Pro Display", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  letter-spacing: -0.012em;
+  animation: headline-enter 620ms cubic-bezier(.16, 1, .3, 1) both;
+}
+
+.headline-kito {
+  position: relative;
+  display: inline-block;
+  color: #315f16;
+  background: linear-gradient(100deg, #16330d, #4f8f1f 45%, #91c83f 72%, #244813);
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-weight: 800;
+  letter-spacing: -0.018em;
+  text-shadow: 0 18px 38px rgba(95, 151, 35, 0.16);
+}
+
+.nav-cta,
+.extension-cta {
+  position: relative;
+  overflow: hidden;
+  transform: translateZ(0);
+  transition: transform 220ms ease, box-shadow 220ms ease, border-color 220ms ease, background-color 220ms ease;
+}
+
+.nav-cta::after,
+.extension-cta::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  width: 0;
+  height: 2px;
+  border-radius: 999px;
+  background: #c8ea5a;
+  transform: translateX(-50%);
+  transition: width 260ms ease;
+}
+
+.nav-cta:hover,
+.extension-cta:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 22px 46px rgba(16, 32, 20, 0.2);
+  border-color: rgba(95, 151, 35, 0.52);
+}
+
+.nav-cta:hover::after,
+.extension-cta:hover::after {
+  width: calc(100% - 34px);
+}
+
+.extension-cta::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 0%, rgba(200, 234, 90, 0.24) 45%, transparent 72%);
+  transform: translateX(-120%);
+  transition: transform 520ms ease;
+}
+
+.extension-cta:hover::before {
+  transform: translateX(120%);
+}
+
+.extension-cta > * {
+  position: relative;
+  z-index: 1;
+}
+
+.nav-cta {
+  background: #102014;
+  color: #c8ea5a;
+  font-weight: 500;
+  box-shadow: 0 16px 36px rgba(16, 32, 20, 0.18);
+}
+
+.nav-cta:hover {
+  background: #17331d;
+}
+
+.extension-cta {
+  font-weight: 700;
+}
+
+.proof-chip {
+  animation: chip-rise 520ms ease both;
+}
+
+.proof-chip:nth-child(2) {
+  animation-delay: 90ms;
+}
+
+.proof-chip:nth-child(3) {
+  animation-delay: 180ms;
+}
+
+.proof-chip:nth-child(4) {
+  animation-delay: 270ms;
+}
+
+.hero-ring {
+  animation: soft-spin 16s linear infinite;
+}
+
+.hero-ring::before,
+.hero-ring::after {
+  content: "";
+  position: absolute;
+  border-radius: inherit;
+  border: 1px solid rgba(95, 151, 35, 0.14);
+}
+
+.hero-ring::before {
+  inset: 34px;
+}
+
+.hero-ring::after {
+  inset: 72px;
+  background: rgba(200, 234, 90, 0.12);
+}
+
+.preview-card {
+  animation: card-float 4.4s ease-in-out infinite;
+}
+
+.preview-card-two {
+  animation-delay: 900ms;
+}
+
+.kito-hero-img {
+  animation: kito-hero-bob 3.6s ease-in-out infinite;
+}
+
+@keyframes brand-float {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-1deg);
+  }
+  50% {
+    transform: translateY(-4px) rotate(1deg);
+  }
+}
+
+@keyframes brand-pulse {
+  0% {
+    opacity: 0.7;
+    transform: scale(0.88);
+  }
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(1.16);
+  }
+}
+
+@keyframes lime-glow {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 0 rgba(200, 234, 90, 0));
+  }
+  50% {
+    filter: drop-shadow(0 0 12px rgba(200, 234, 90, 0.64));
+  }
+}
+
+@keyframes brand-text-sheen {
+  0%,
+  100% {
+    background-position: 0% 50%;
+    filter: drop-shadow(0 0 0 rgba(200, 234, 90, 0));
+  }
+  50% {
+    background-position: 100% 50%;
+    filter: drop-shadow(0 0 9px rgba(200, 234, 90, 0.34));
+  }
+}
+
+@keyframes headline-enter {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes chip-rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes soft-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes card-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-9px);
+  }
+}
+
+@keyframes kito-hero-bob {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-1deg);
+  }
+  50% {
+    transform: translateY(-12px) rotate(1.5deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-mark,
+  .brand-mark::after,
+  .brand-name,
+  .proof-chip,
+  .hero-ring,
+  .preview-card,
+  .kito-hero-img {
+    animation: none;
+  }
+
+  .nav-cta,
+  .extension-cta {
+    transition: none;
+  }
+}
