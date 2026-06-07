@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "BuildClub Basic Extension",
+  "version": "0.0.1",
+  "description": "A BuildClub course helper that turns lessons into notes, quizzes, and build ideas.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "content_scripts": [
+    {
+      "matches": ["https://buildclub.ai/*", "https://*.buildclub.ai/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["public/2.png", "public/2-cutout.png"],
+      "matches": ["https://buildclub.ai/*", "https://*.buildclub.ai/*"]
+    }
+  ],
+  "action": {
+    "default_title": "BuildClub Extension",
+    "default_popup": "popup.html"
+  }
+}
