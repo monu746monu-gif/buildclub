@@ -19,7 +19,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["public/2.png", "public/2-cutout.png"],
+      "resources": ["public/2.png", "public/2-cutout.png", "public/card.png", "public/card2.png"],
       "matches": ["https://buildclub.ai/*", "https://*.buildclub.ai/*"]
     }
   ],

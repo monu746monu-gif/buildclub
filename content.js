@@ -35,6 +35,10 @@ let latestRequestedSidePanelTab = "Explain";
 let sameZoneTimer = null;
 let codePauseTimer = null;
 let hasShownCertificateCard = false;
+let lastObservedLessonKey = "";
+let lastObservedUrl = window.location.href;
+let routeCheckTimer = null;
+let certificateCheckTimer = null;
 
 const blockedTags = new Set([
   "SCRIPT",
@@ -483,7 +487,8 @@ function createShareText(idea) {
 function getDefaultProfile() {
   return {
     projects: [],
-    awardedTier: "none"
+    awardedTier: "none",
+    memberName: ""
   };
 }
 
@@ -533,7 +538,7 @@ function getShareProgressText(progress, tier) {
 
 function shouldMarkCourseComplete(courseRecord) {
   const pageSignal = `${document.title} ${document.body?.innerText ?? ""}`.toLowerCase();
-  return getSortedLessons(courseRecord).length >= 3 || /course complete|completed course|congratulations|certificate|finished the course/.test(pageSignal);
+  return isCertificateOrCompletionScreen() || /course complete|completed course|finished the course/.test(pageSignal);
 }
 
 function getSpeakableText(container) {
@@ -803,31 +808,132 @@ async function downloadNotesPdf() {
   triggerPdfDownload(createCourseNotesPdfData(fallbackRecord), `${fallbackRecord.title}-notes`);
 }
 
-function getCertificateCandidate() {
+function getUserNameFromPage() {
   const selectors = [
+    "[data-user-name]",
+    "[data-profile-name]",
+    "[data-testid*='user' i]",
+    "[data-testid*='profile' i]",
+    "[aria-label*='profile' i]",
+    "[class*='profile' i]",
+    "[class*='avatar' i]",
+    "[class*='user' i]",
+    "header"
+  ];
+
+  const badNames = new Set(["profile", "account", "settings", "logout", "log out", "dashboard", "buildclub", "build club", "member"]);
+  for (const selector of selectors) {
+    const elements = [...document.querySelectorAll(selector)].slice(0, 12);
+    for (const element of elements) {
+      const candidates = [
+        element.getAttribute("data-user-name"),
+        element.getAttribute("data-profile-name"),
+        element.getAttribute("aria-label")?.replace(/profile|account|menu|for/gi, ""),
+        element.textContent
+      ];
+
+      for (const candidate of candidates) {
+        const clean = String(candidate || "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .split(/\n|•|\||,/)[0]
+          .replace(/^(hi|hello|hey|welcome back)\s+/i, "")
+          .trim();
+
+        if (clean.length < 2 || clean.length > 34) continue;
+        if (!/[a-z]/i.test(clean)) continue;
+        if (badNames.has(clean.toLowerCase())) continue;
+        if (/\b(course|lesson|module|certificate|build club|search|menu|notification)\b/i.test(clean)) continue;
+        return clean;
+      }
+    }
+  }
+
+  const pageText = document.body?.innerText || "";
+  const match = pageText.match(/\b(?:Hi|Hello|Hey|Welcome back),?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/);
+  return match?.[1] || "BuildClub Member";
+}
+
+async function getMemberName() {
+  const memory = await getCourseMemory();
+  const profile = memory[profileMemoryKey] ?? getDefaultProfile();
+  const detectedName = getUserNameFromPage();
+  const memberName = detectedName || profile.memberName || "BuildClub Member";
+
+  if (memberName && memberName !== profile.memberName) {
+    memory[profileMemoryKey] = { ...profile, memberName };
+    await storageSet({ [courseMemoryKey]: memory });
+  }
+
+  return memberName;
+}
+
+function isDirectCertificateAsset(url) {
+  if (!url) return false;
+  if (/^(blob:|data:)/i.test(url)) return true;
+
+  try {
+    const parsed = new URL(url, window.location.href);
+    return /\.(pdf|png|jpe?g|webp)(\?|#|$)/i.test(parsed.pathname) || /(^|[?&])(download|attachment)=/i.test(parsed.search);
+  } catch (_error) {
+    return false;
+  }
+}
+
+function isCertificateOrCompletionScreen() {
+  const href = window.location.href.toLowerCase();
+  const path = `${window.location.pathname}${window.location.search}${window.location.hash}`.toLowerCase();
+  const title = document.title.toLowerCase();
+  const text = (document.body?.innerText || "").toLowerCase();
+  const actionText = [...document.querySelectorAll("a, button")]
+    .map((element) => element.textContent || element.getAttribute("aria-label") || "")
+    .join(" ")
+    .toLowerCase();
+  const strongCompletion = /congratulations|course complete|completed course|finished the course|you completed|certificate earned|claim certificate|download certificate|view certificate|get certificate|share certificate/.test(`${text} ${actionText}`);
+  const certificateRoute = /certificate|certification|completion|complete/.test(path);
+  const certificateHeading = Boolean([...document.querySelectorAll("h1, h2, h3")].some((heading) => /certificate|congratulations|course complete|completed course/i.test(heading.textContent || "")));
+  const certificateAction = /\b(download|view|claim|get|share|open)\s+(your\s+)?certificate\b/.test(actionText);
+  const directCertificate = Boolean(getCertificateCandidate({ directOnly: true }));
+
+  return directCertificate || certificateRoute || certificateHeading || certificateAction || (/certificate|completion/.test(`${title} ${href}`) && strongCompletion) || /download certificate|view certificate|claim certificate|certificate earned/.test(text);
+}
+
+function getCertificateCandidate({ directOnly = false } = {}) {
+  const selectors = [
+    "a[download*='certificate' i]",
+    "a[download*='cert' i]",
+    "a[href$='.pdf' i]",
     "a[href*='certificate' i]",
     "a[href*='cert' i]",
-    "a[download]",
     "img[src*='certificate' i]",
     "img[alt*='certificate' i]",
-    "canvas"
+    "[aria-label*='certificate' i] canvas",
+    "[class*='certificate' i] canvas",
+    "[id*='certificate' i] canvas"
   ];
 
   for (const selector of selectors) {
     const element = document.querySelector(selector);
     if (!element || element.closest(`#${widgetId}, #${finalCourseCardModalId}`)) continue;
+    const certificateText = `${element.textContent || ""} ${element.getAttribute("aria-label") || ""} ${element.getAttribute("download") || ""} ${element.getAttribute("href") || ""} ${element.getAttribute("src") || ""}`.toLowerCase();
+    if (!/certificate|cert/.test(certificateText) && element.tagName !== "CANVAS") continue;
 
     if (element.tagName === "A" && element.href) {
-      return { type: "link", url: element.href };
+      if (directOnly && !isDirectCertificateAsset(element.href)) continue;
+      return {
+        type: isDirectCertificateAsset(element.href) ? "download" : "page",
+        url: element.href,
+        filename: element.getAttribute("download") || "buildclub-certificate"
+      };
     }
 
     if (element.tagName === "IMG" && element.src) {
-      return { type: "image", url: element.src };
+      return { type: "image", url: element.src, filename: "buildclub-certificate.png" };
     }
 
     if (element.tagName === "CANVAS") {
       try {
-        return { type: "image", url: element.toDataURL("image/png") };
+        return { type: "image", url: element.toDataURL("image/png"), filename: "buildclub-certificate.png" };
       } catch (_error) {
         return null;
       }
@@ -848,34 +954,47 @@ function downloadUrl(url, filename) {
   return true;
 }
 
+function downloadCardImage(cardImageUrl) {
+  const image = new Image();
+  image.crossOrigin = "anonymous";
+  image.onload = () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth || image.width;
+    canvas.height = image.naturalHeight || image.height;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    downloadUrl(canvas.toDataURL("image/png"), "buildclub-membership-card.png");
+  };
+  image.src = cardImageUrl;
+}
+
 async function createNotesObjectUrl(courseRecord) {
   const pdf = createCourseNotesPdfData(courseRecord);
   const blob = new Blob([pdf], { type: "application/pdf" });
   return URL.createObjectURL(blob);
 }
 
-function showFinalCourseCard({ courseRecord, notesUrl, certificateUrl }) {
+function showFinalCourseCard({ notesUrl, certificateUrl }) {
   document.getElementById(finalCourseCardModalId)?.remove();
-  const lessons = getSortedLessons(courseRecord);
-  const firstIdea = lessons.find((lesson) => lesson.ideas?.[0])?.ideas?.[0] || "Build a project from this course.";
+  const cardImage = typeof chrome !== "undefined" && chrome.runtime?.getURL ? chrome.runtime.getURL("public/card2.png") : "/card2.png";
   const modal = document.createElement("div");
   modal.id = finalCourseCardModalId;
   modal.innerHTML = `
     <div class="bc-final-backdrop" data-final-close="true"></div>
-    <section class="bc-final-card" role="dialog" aria-modal="true" aria-label="BuildClub completion card">
+    <section class="bc-final-shell" role="dialog" aria-modal="true" aria-label="BuildClub completion card">
       <button class="bc-final-close" data-final-close="true" aria-label="Close">×</button>
-      <div class="bc-final-kicker">Written member of BuildClub</div>
-      <h2>${escapeHtml(courseRecord.title)}</h2>
-      <p>Kito saved your short notes, certificate, and project idea in one completion card.</p>
-      <div class="bc-final-grid">
-        <a href="${escapeHtml(notesUrl)}" download="${escapeHtml(courseRecord.slug || "buildclub-course")}-notes.pdf">Short notes</a>
-        ${certificateUrl ? `<a href="${escapeHtml(certificateUrl)}" download="${escapeHtml(courseRecord.slug || "buildclub-course")}-certificate">Certificate</a>` : `<span>No certificate file found</span>`}
+      <div class="bc-final-card">
+        <img class="bc-final-art" src="${escapeHtml(cardImage)}" alt="BuildClub member card" />
+        <div class="bc-final-left-fade"></div>
+        <div class="bc-final-scan"></div>
       </div>
-      <div class="bc-final-note">
-        <strong>Project help</strong>
-        <span>${escapeHtml(firstIdea)}</span>
+      <div class="bc-final-actions">
+        <button type="button" data-final-download-card="true">Download Card</button>
+        <a href="${escapeHtml(notesUrl)}" download="buildclub-course-notes.pdf">Notes</a>
+        ${certificateUrl ? `<a href="${escapeHtml(certificateUrl)}" ${isDirectCertificateAsset(certificateUrl) ? `download="buildclub-certificate"` : `target="_blank" rel="noopener noreferrer"`}>Certificate</a>` : ""}
       </div>
-      <div class="bc-final-footer">BuildClub Builder Card • Member verified by course completion</div>
     </section>
   `;
 
@@ -894,98 +1013,108 @@ function showFinalCourseCard({ courseRecord, notesUrl, certificateUrl }) {
     #${finalCourseCardModalId} .bc-final-backdrop {
       position: absolute;
       inset: 0;
-      background: rgba(8, 18, 11, 0.58);
-      backdrop-filter: blur(10px);
+      background:
+        radial-gradient(circle at 50% 20%, rgba(255, 214, 129, .34), transparent 34%),
+        rgba(250, 248, 243, .86);
+      backdrop-filter: blur(12px);
+    }
+
+    #${finalCourseCardModalId} .bc-final-shell {
+      position: relative;
+      width: min(330px, calc(100vw - 30px));
+      color: #e9572b;
+      perspective: 1200px;
     }
 
     #${finalCourseCardModalId} .bc-final-card {
       position: relative;
-      width: min(460px, calc(100vw - 32px));
-      border: 1px solid rgba(95, 151, 35, 0.36);
-      border-radius: 18px;
-      background: #fbfff0;
-      padding: 24px;
-      box-shadow: 0 30px 90px rgba(0, 0, 0, 0.34);
+      overflow: hidden;
+      border-radius: 32px;
+      background: #fff0c9;
+      box-shadow: 0 22px 54px rgba(48, 39, 27, 0.24);
+      animation: bc-final-reveal 520ms cubic-bezier(.16, 1, .3, 1), bc-final-float 4s ease-in-out infinite;
+    }
+
+    #${finalCourseCardModalId} .bc-final-scan {
+      position: absolute;
+      z-index: 4;
+      inset: -70px;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,.32), transparent);
+      transform: translateX(-70%) rotate(12deg);
+      animation: bc-final-scan 3.2s ease-in-out infinite;
+      pointer-events: none;
+    }
+
+    #${finalCourseCardModalId} .bc-final-art {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    #${finalCourseCardModalId} .bc-final-left-fade {
+      position: absolute;
+      z-index: 2;
+      left: 0;
+      top: 0;
+      width: 23%;
+      height: 43%;
+      background:
+        linear-gradient(90deg, rgba(21, 18, 14, .88), rgba(21, 18, 14, .44) 54%, rgba(21, 18, 14, .12) 82%, transparent),
+        linear-gradient(180deg, rgba(21, 18, 14, .52), transparent 68%);
+      pointer-events: none;
     }
 
     #${finalCourseCardModalId} .bc-final-close {
       position: absolute;
-      top: 12px;
-      right: 12px;
-      width: 30px;
-      height: 30px;
+      top: -10px;
+      right: -10px;
+      z-index: 8;
+      width: 28px;
+      height: 28px;
       border: 0;
       border-radius: 999px;
-      background: #102014;
-      color: #c8ea5a;
-      font-size: 20px;
+      background: #e9572b;
+      color: #fff2bc;
+      font-size: 18px;
+      cursor: pointer;
+      box-shadow: 0 10px 22px rgba(48, 39, 27, 0.22);
+    }
+
+    #${finalCourseCardModalId} .bc-final-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: center;
+      margin-top: 12px;
+    }
+
+    #${finalCourseCardModalId} .bc-final-actions a,
+    #${finalCourseCardModalId} .bc-final-actions button {
+      border: 1px solid rgba(233, 87, 43, .22);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, .72);
+      color: #e9572b;
+      padding: 8px 13px;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 950;
+      text-decoration: none;
       cursor: pointer;
     }
 
-    #${finalCourseCardModalId} .bc-final-kicker,
-    #${finalCourseCardModalId} .bc-final-footer {
-      color: #4c6b24;
-      font-size: 11px;
-      font-weight: 950;
-      letter-spacing: 0.8px;
-      text-transform: uppercase;
+    @keyframes bc-final-reveal {
+      from { opacity: 0; transform: translateY(18px) rotateX(-9deg) scale(.95); }
+      to { opacity: 1; transform: translateY(0) rotateX(0) scale(1); }
     }
 
-    #${finalCourseCardModalId} h2 {
-      margin: 10px 0 0;
-      font-size: 30px;
-      line-height: 1.05;
+    @keyframes bc-final-float {
+      0%, 100% { transform: translateY(0) rotateX(0deg) rotateY(0deg); }
+      50% { transform: translateY(-4px) rotateX(1.2deg) rotateY(-1.2deg); }
     }
 
-    #${finalCourseCardModalId} p {
-      color: #40513b;
-      font-size: 14px;
-      line-height: 1.45;
-    }
-
-    #${finalCourseCardModalId} .bc-final-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
-      margin-top: 18px;
-    }
-
-    #${finalCourseCardModalId} .bc-final-grid a,
-    #${finalCourseCardModalId} .bc-final-grid span {
-      display: grid;
-      place-items: center;
-      min-height: 56px;
-      border: 1px solid rgba(95, 151, 35, 0.34);
-      border-radius: 10px;
-      background: #ffffff;
-      color: #102014;
-      font-size: 13px;
-      font-weight: 950;
-      text-align: center;
-      text-decoration: none;
-    }
-
-    #${finalCourseCardModalId} .bc-final-note {
-      display: grid;
-      gap: 5px;
-      margin-top: 14px;
-      border-radius: 10px;
-      background: #edf8c7;
-      padding: 12px;
-    }
-
-    #${finalCourseCardModalId} .bc-final-note strong {
-      font-size: 12px;
-    }
-
-    #${finalCourseCardModalId} .bc-final-note span {
-      color: #29451d;
-      font-size: 13px;
-      line-height: 1.35;
-    }
-
-    #${finalCourseCardModalId} .bc-final-footer {
-      margin-top: 16px;
+    @keyframes bc-final-scan {
+      0%, 36% { transform: translateX(-70%) rotate(12deg); }
+      72%, 100% { transform: translateX(70%) rotate(12deg); }
     }
   `;
 
@@ -994,6 +1123,11 @@ function showFinalCourseCard({ courseRecord, notesUrl, certificateUrl }) {
     if (event.target.closest("[data-final-close]")) {
       modal.remove();
       setTimeout(() => URL.revokeObjectURL(notesUrl), 1000);
+      return;
+    }
+
+    if (event.target.closest("[data-final-download-card]")) {
+      downloadCardImage(cardImage);
     }
   });
   document.body.appendChild(modal);
@@ -1001,8 +1135,7 @@ function showFinalCourseCard({ courseRecord, notesUrl, certificateUrl }) {
 
 async function handleCertificateCompletion({ force = false } = {}) {
   if (hasShownCertificateCard && !force) return;
-  const pageSignal = `${document.title} ${document.body?.innerText ?? ""}`.toLowerCase();
-  if (!force && !/certificate|congratulations|course complete|completed course|finished the course/.test(pageSignal)) {
+  if (!isCertificateOrCompletionScreen()) {
     return;
   }
 
@@ -1014,13 +1147,14 @@ async function handleCertificateCompletion({ force = false } = {}) {
   await storageSet({ [courseMemoryKey]: memory });
 
   const certificate = getCertificateCandidate();
-  if (certificate?.url && !sessionStorage.getItem("kitoCertificateDownloaded")) {
-    downloadUrl(certificate.url, `${courseRecord.slug || "buildclub-course"}-certificate`);
+  if (certificate?.url && certificate.type !== "page" && !sessionStorage.getItem("kitoCertificateDownloaded")) {
+    downloadUrl(certificate.url, certificate.filename || `${courseRecord.slug || "buildclub-course"}-certificate`);
     sessionStorage.setItem("kitoCertificateDownloaded", "true");
   }
 
   const notesUrl = await createNotesObjectUrl(courseRecord);
-  showFinalCourseCard({ courseRecord, notesUrl, certificateUrl: certificate?.url || "" });
+  const memberName = await getMemberName();
+  showFinalCourseCard({ courseRecord, notesUrl, certificateUrl: certificate?.url || "", memberName });
 }
 
 function storageGet(key) {
@@ -1497,11 +1631,40 @@ function getCourseInfo() {
 }
 
 function getLessonKey() {
-  return `${window.location.hostname}${window.location.pathname}`.toLowerCase();
+  const lessonTitle = getLessonTitle()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 80);
+  return `${window.location.hostname}${window.location.pathname}${lessonTitle ? `/${lessonTitle}` : ""}`.toLowerCase();
 }
 
 function getLessonTitle() {
   return getLessonTopic();
+}
+
+function isCourseOpen() {
+  const path = window.location.pathname.toLowerCase();
+  const pageText = (document.body?.innerText || "").toLowerCase();
+  const hasCoursePath = /\/(course|courses|academy|class|classes|lesson|lessons|module|modules)\b/.test(path);
+  const hasLearningSignal = /\b(start course|continue course|lesson|module|curriculum|certificate|course complete|next lesson)\b/.test(pageText);
+  const hasReadableLesson = getPageTextForIdeas().length > 700 && Boolean(document.querySelector("h1, h2"));
+  const isSimpleHome = /^\/?$/.test(path) || /\b(sign in|get started|pricing|about|contact)\b/.test(path) && !hasCoursePath;
+
+  return !isSimpleHome && (hasCoursePath || hasLearningSignal || hasReadableLesson);
+}
+
+function resetLessonTracking() {
+  hasShownBuildPrompt = false;
+  lastSelectedText = "";
+  latestStuckContext = null;
+  scrollDirectionChanges = [];
+  currentScrollZone = Math.floor(window.scrollY / stuckZoneSize);
+  currentZoneEnteredAt = Date.now();
+  document.getElementById(stuckHelpBubbleId)?.remove();
+  document.getElementById(selectionExplainBoxId)?.remove();
+  resetSameZoneTimer();
+  resetCodePauseTimer();
 }
 
 async function getCourseMemory() {
@@ -1978,11 +2141,11 @@ function renderCourseNotes(widget, courseRecord) {
     </div>
     <button class="kito-primary" data-action="review-current">Review this lesson</button>
     <button class="kito-secondary" data-action="download-notes-pdf">Download completed notes PDF</button>
-    <button class="kito-secondary" data-action="show-progress-card">Progress card</button>
   `);
 }
 
 async function hydrateCourseWelcome(widget) {
+  if (!isCourseOpen()) return;
   const courseRecord = await getCurrentCourseRecord();
   const lessons = getSortedLessons(courseRecord);
   if (!courseRecord || lessons.length === 0 || hasShownBuildPrompt) return;
@@ -1999,16 +2162,28 @@ function renderWidgetState(widget, state) {
   const chosenIdea = selectedProjectIdea || ideas[0];
   const shareText = createShareText(chosenIdea);
 
-  widget.classList.toggle("build-ready", state !== "hello");
+  widget.classList.toggle("build-ready", !["hello", "idle", "course-started"].includes(state));
   widget.classList.toggle("card-ready", state === "card");
+
+  if (state === "idle") {
+    setBubbleContent(widget, `
+      <div class="kito-message">Hey, I am Kito. Start a BuildClub course and I will join you with notes, docs, and project help.</div>
+    `);
+    return;
+  }
+
+  if (state === "course-started") {
+    setBubbleContent(widget, `
+      <div class="kito-message">I joined this course. Keep learning and I will summarize this module when you reach the end.</div>
+      <button class="kito-primary" data-action="show-course-notes">Course notes</button>
+      <button class="kito-secondary" data-action="show-translate">Translate page</button>
+    `);
+    return;
+  }
 
   if (state === "hello") {
     setBubbleContent(widget, `
-      <div class="kito-message">Hey, I am Kito. Open the course and read along. I will come back when you finish.</div>
-      ${renderMustReadDocsHtml()}
-      <button class="kito-primary" data-action="show-course-notes">Course notes</button>
-      <button class="kito-secondary" data-action="show-progress-card">Progress card</button>
-      <button class="kito-secondary" data-action="show-translate">Translate page</button>
+      <div class="kito-message">Hey, I am Kito. Start a BuildClub course and I will join you with notes, docs, and project help.</div>
     `);
     return;
   }
@@ -2037,7 +2212,6 @@ function renderWidgetState(widget, state) {
       <button class="kito-primary" data-action="show-quiz">Take quick quiz</button>
       <button class="kito-secondary" data-action="start-building">Project help</button>
       <button class="kito-secondary" data-action="download-notes-pdf">Download completed notes PDF</button>
-      <button class="kito-secondary" data-action="final-course-card">Final card</button>
       <button class="kito-secondary" data-action="show-translate">Translate page</button>
     `);
     return;
@@ -2700,13 +2874,6 @@ function createBuildClubWidget({ toggle = true } = {}) {
       return;
     }
 
-    if (action === "show-progress-card") {
-      const memory = await getCourseMemory();
-      const progress = getLearningProgress(memory);
-      showProgressCardModal({ tier: getCardTier(progress), progress });
-      return;
-    }
-
     if (action === "review-current") {
       renderWidgetState(widget, "ready");
       return;
@@ -2714,11 +2881,6 @@ function createBuildClubWidget({ toggle = true } = {}) {
 
     if (action === "download-notes-pdf") {
       downloadNotesPdf();
-      return;
-    }
-
-    if (action === "final-course-card") {
-      handleCertificateCompletion({ force: true }).catch(() => {});
       return;
     }
 
@@ -2764,7 +2926,7 @@ function createBuildClubWidget({ toggle = true } = {}) {
     }
   });
   document.body.appendChild(widget);
-  renderWidgetState(widget, "hello");
+  renderWidgetState(widget, isCourseOpen() ? "course-started" : "idle");
   hydrateCourseWelcome(widget).catch(() => {});
 }
 
@@ -2780,17 +2942,12 @@ function showBuildPrompt() {
   if (!widget) return;
 
   widget.classList.add("build-ready");
-  saveCompletedLessonAndCheckCard()
-    .then(({ awardedTier, progress }) => {
-      if (awardedTier) {
-        showProgressCardModal({ tier: awardedTier, progress });
-      }
-    })
-    .catch(() => {});
+  saveCompletedLessonAndCheckCard().catch(() => {});
   renderWidgetState(widget, "ready");
 }
 
 function trackReadingProgress() {
+  if (!isCourseOpen()) return;
   if (hasShownBuildPrompt) return;
   if (getScrollPercent() >= 95) {
     hasShownBuildPrompt = true;
@@ -2799,6 +2956,7 @@ function trackReadingProgress() {
 }
 
 function trackStuckScrollSignals() {
+  if (!isCourseOpen()) return;
   const scrollY = window.scrollY;
   const nextZone = Math.floor(scrollY / stuckZoneSize);
   const delta = scrollY - lastScrollY;
@@ -2828,6 +2986,7 @@ function trackStuckScrollSignals() {
 }
 
 function trackSelectionSignal() {
+  if (!isCourseOpen()) return;
   const selectedText = String(window.getSelection()?.toString() || "")
     .replace(/\s+/g, " ")
     .trim();
@@ -2837,7 +2996,6 @@ function trackSelectionSignal() {
   const context = buildStuckContext("text-selected", selectedText);
   saveStuckContext(context).catch(() => {});
   showSelectionExplainBox(selectedText, context).catch(() => {});
-  triggerStuckDetected("text-selected", selectedText);
 }
 
 function shouldTranslateNode(node) {
@@ -2917,6 +3075,91 @@ function restorePageText() {
   originalTextByNode.clear();
 }
 
+function refreshWidgetForCurrentPage() {
+  const widget = document.getElementById(widgetId);
+  if (!widget) return;
+
+  if (!isCourseOpen()) {
+    renderWidgetState(widget, "idle");
+    return;
+  }
+
+  if (!hasShownBuildPrompt) {
+    renderWidgetState(widget, "course-started");
+    hydrateCourseWelcome(widget).catch(() => {});
+  }
+}
+
+function handlePossibleRouteChange() {
+  const nextUrl = window.location.href;
+  const nextLessonKey = getLessonKey();
+  if (nextUrl === lastObservedUrl && nextLessonKey === lastObservedLessonKey) return;
+
+  lastObservedUrl = nextUrl;
+  lastObservedLessonKey = nextLessonKey;
+  resetLessonTracking();
+  window.setTimeout(() => {
+    refreshWidgetForCurrentPage();
+    trackReadingProgress();
+    handleCertificateCompletion().catch(() => {});
+  }, 350);
+}
+
+function installRouteWatcher() {
+  lastObservedLessonKey = getLessonKey();
+  const originalPushState = history.pushState;
+  const originalReplaceState = history.replaceState;
+
+  history.pushState = function pushStatePatched(...args) {
+    const result = originalPushState.apply(this, args);
+    window.setTimeout(handlePossibleRouteChange, 80);
+    return result;
+  };
+
+  history.replaceState = function replaceStatePatched(...args) {
+    const result = originalReplaceState.apply(this, args);
+    window.setTimeout(handlePossibleRouteChange, 80);
+    return result;
+  };
+
+  window.addEventListener("popstate", () => window.setTimeout(handlePossibleRouteChange, 80));
+  routeCheckTimer = window.setInterval(handlePossibleRouteChange, 1200);
+}
+
+function scheduleCertificateCheck() {
+  if (certificateCheckTimer) {
+    window.clearTimeout(certificateCheckTimer);
+  }
+
+  certificateCheckTimer = window.setTimeout(() => {
+    handleCertificateCompletion().catch(() => {});
+  }, 500);
+}
+
+function installCertificateWatcher() {
+  const observer = new MutationObserver((mutations) => {
+    if (hasShownCertificateCard) return;
+    const sawCertificateSignal = mutations.some((mutation) => {
+      const text = [...mutation.addedNodes]
+        .map((node) => node.textContent || "")
+        .join(" ")
+        .toLowerCase();
+      return /certificate|congratulations|course complete|completed course|download/.test(text);
+    });
+
+    if (sawCertificateSignal || /certificate|completion|complete|cert/i.test(window.location.href)) {
+      scheduleCertificateCheck();
+    }
+  });
+
+  observer.observe(document.body, { childList: true, subtree: true });
+  window.setInterval(() => {
+    if (!hasShownCertificateCard && isCertificateOrCompletionScreen()) {
+      scheduleCertificateCheck();
+    }
+  }, 1500);
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === "SHOW_BUILDCLUB_WIDGET") {
     createBuildClubWidget({ toggle: false });
@@ -2949,6 +3192,8 @@ window.addEventListener("scroll", trackReadingProgress, { passive: true });
 window.addEventListener("scroll", trackStuckScrollSignals, { passive: true });
 document.addEventListener("selectionchange", trackSelectionSignal);
 createBuildClubWidget({ toggle: false });
+installRouteWatcher();
+installCertificateWatcher();
 resetSameZoneTimer();
 resetCodePauseTimer();
 trackReadingProgress();
