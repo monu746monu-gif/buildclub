@@ -13,9 +13,19 @@ The content script watches reading behavior on BuildClub pages and creates a stu
 
 When triggered, Kito saves the current URL, page title, selected text, nearby section text, nearest heading, code-block state, trigger reason, scroll position, and timestamp. A small help bubble appears above Kito with Explain, Official Docs, Claude Prompt, and Ignore actions. Ignore hides the bubble, snoozes Kito for 10 minutes, and remembers the dismissed section.
 
+When a learner selects a line while Kito is open, Kito now explains that selected line near the cursor immediately. The side panel also has a paste box where learners can paste the exact line they did not understand and get a more detailed explanation tied to official docs.
+
 ## Official Docs Finder
 
 The side panel includes an Official Docs tab powered by `src/lib/officialDocs.ts`. It matches tools, commands, frameworks, and concepts in the selected/current section against a local official-docs registry. Results are scored by matched keywords and shown as official documentation cards.
+
+Kito also shows must-read official docs directly inside the floating widget on every page, including the welcome state, lesson summary, and course notes view.
+
+## Notes, Projects, Certificates
+
+Kito saves lesson notes automatically and exports the whole course as a maximum two-page flowchart PDF: page one is the learning flow, page two is compact course notes and project prompts. Lesson review now includes direct project help.
+
+On certificate or course-complete pages, Kito attempts to download the certificate from the visible certificate link, image, or canvas. It then creates a final BuildClub completion card with links to short notes, the certificate, project help, and a written BuildClub member label.
 
 ## Learner Feedback
 
@@ -32,5 +42,7 @@ No backend or paid API is required. The explanation and Claude prompt helpers in
 5. Click Official Docs and open a suggested docs link.
 6. Open Claude Prompt and click Copy Prompt.
 7. Write a problem in the feedback form and click Send Feedback.
+8. Select any long line and confirm the near-cursor explanation box appears.
+9. Open a certificate/completion page and confirm the final card appears.
 
 Chrome's Side Panel API is designed for persistent extension UI beside the user's browsing journey, which fits the Kito assistant well.

@@ -116,6 +116,19 @@ function findOfficialDocs(text) {
     .slice(0, 5);
 }
 
+function getFallbackDocs() {
+  return OFFICIAL_DOCS.filter((doc) => ["claude-code", "github", "nodejs"].includes(doc.id)).map((doc) => ({
+    ...doc,
+    matchedKeywords: ["recommended"],
+    score: 1
+  }));
+}
+
+function getMustReadDocs(text) {
+  const docs = findOfficialDocs(text);
+  return docs.length ? docs : getFallbackDocs();
+}
+
 function explainSection(currentContext) {
   const text = getContextText(currentContext);
   const heading = currentContext?.nearestHeading ? ` under "${currentContext.nearestHeading}"` : "";
@@ -127,6 +140,17 @@ function explainSection(currentContext) {
 
   // Replace this mock explanation with a real AI/API call when Kito gets backend support.
   return `This looks like ${basis}${heading}. In simple terms, focus on the main tool or concept being introduced, what action it asks you to take, and what result you should expect. Break it into one small step: read the instruction, identify the command or code idea, then try it in a safe project area before moving on.`;
+}
+
+function explainPastedLine(line, currentContext) {
+  const cleanLine = line.replace(/\s+/g, " ").trim();
+  if (!cleanLine) return explainSection(currentContext);
+
+  const heading = currentContext?.nearestHeading ? ` The nearby lesson heading is "${currentContext.nearestHeading}".` : "";
+  const docs = getMustReadDocs(`${cleanLine} ${getContextText(currentContext)}`);
+  const docsText = docs.slice(0, 2).map((doc) => `${doc.title} (${doc.source})`).join(" and ");
+
+  return `Line-by-line explanation: "${cleanLine}" means you should identify the concept, understand the action it expects, and verify the result before moving forward.${heading} Read it slowly in this order: first find the tool or keyword, then ask what input it needs, then check what output or page change proves it worked. For official reference, start with ${docsText}.`;
 }
 
 function generateSafeClaudePrompt(currentContext) {
@@ -213,6 +237,9 @@ function bindFeedbackForm() {
 function renderExplain() {
   if (!context) return renderEmpty();
 
+  const pastedLine = sessionStorage.getItem("kitoPastedLine") || "";
+  const explanation = pastedLine ? explainPastedLine(pastedLine, context) : explainSection(context);
+
   contentEl.innerHTML = `
     <section class="card">
       <div class="label">Trigger reason</div>
@@ -228,32 +255,38 @@ function renderExplain() {
     </section>
     <section class="card">
       <div class="label">Simple explanation</div>
-      <div class="value">${escapeHtml(explainSection(context))}</div>
+      <div class="value">${escapeHtml(explanation)}</div>
+    </section>
+    <section class="card">
+      <div class="label">Paste the line</div>
+      <div class="value">Copy-paste the exact line you did not understand. Kito will explain that line with official docs.</div>
+      <textarea id="line-input" class="feedback-input" rows="3" placeholder="Paste the confusing line here...">${escapeHtml(pastedLine)}</textarea>
+      <button class="secondary" type="button" id="explain-line">Explain pasted line</button>
     </section>
     <button class="primary" type="button" id="generate-prompt">Generate Claude Prompt</button>
     ${renderFeedbackCard()}
   `;
 
   document.getElementById("generate-prompt")?.addEventListener("click", () => setActiveTab("Claude Prompt"));
+  document.getElementById("explain-line")?.addEventListener("click", () => {
+    const line = document.getElementById("line-input")?.value?.trim() || "";
+    sessionStorage.setItem("kitoPastedLine", line);
+    renderExplain();
+  });
   bindFeedbackForm();
 }
 
 function renderDocs() {
   if (!context) return renderEmpty();
 
-  const docs = findOfficialDocs(`${context.selectedText || ""} ${context.nearbyText || ""} ${context.nearestHeading || ""}`);
-  if (!docs.length) {
-    contentEl.innerHTML = `
-      <section class="card">
-        <p class="empty">No exact official docs detected for this section yet. Try selecting a specific tool, command, or framework name.</p>
-      </section>
-      ${renderFeedbackCard()}
-    `;
-    bindFeedbackForm();
-    return;
-  }
+  const docs = getMustReadDocs(`${context.selectedText || ""} ${context.nearbyText || ""} ${context.nearestHeading || ""}`);
 
-  contentEl.innerHTML = docs
+  contentEl.innerHTML = `
+    <section class="card">
+      <div class="label">Must read for this page</div>
+      <div class="value">Start with these official docs before applying the lesson.</div>
+    </section>
+  ` + docs
     .map((doc) => `
       <section class="card doc-card">
         <div class="pill-row"><span class="pill official">Official</span></div>

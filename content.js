@@ -6,6 +6,8 @@ const widgetId = "buildclub-academy-helper";
 const courseMemoryKey = "buildclubCourseMemory";
 const profileMemoryKey = "_profile";
 const stuckHelpBubbleId = "kito-stuck-help-bubble";
+const selectionExplainBoxId = "kito-selection-explain-box";
+const finalCourseCardModalId = "buildclub-final-course-card-modal";
 const stuckZoneSize = 400;
 const sameZonePauseMs = 60000;
 const repeatedScrollWindowMs = 20000;
@@ -32,6 +34,7 @@ let latestStuckContext = null;
 let latestRequestedSidePanelTab = "Explain";
 let sameZoneTimer = null;
 let codePauseTimer = null;
+let hasShownCertificateCard = false;
 
 const blockedTags = new Set([
   "SCRIPT",
@@ -129,6 +132,93 @@ const ideaTemplates = [
   "Build a visual explainer that teaches {topic} with examples and quick checks.",
   "Create a mini tool that helps someone practice {topic} and tracks what they learned.",
   "Make a simple challenge generator where students apply {topic} to real situations."
+];
+
+const officialDocs = [
+  {
+    id: "claude-code",
+    title: "Claude Code Official Docs",
+    source: "Anthropic",
+    url: "https://docs.anthropic.com/en/docs/claude-code/overview",
+    keywords: ["claude code", "claude-code", "claude cli", "claude terminal", "agentic coding", "coding agent"]
+  },
+  {
+    id: "claude-api",
+    title: "Claude API Docs",
+    source: "Anthropic",
+    url: "https://platform.claude.com/docs/en/home",
+    keywords: ["claude api", "anthropic api", "messages api", "model", "prompt caching", "tool use"]
+  },
+  {
+    id: "chrome-extensions",
+    title: "Chrome Extensions Documentation",
+    source: "Chrome for Developers",
+    url: "https://developer.chrome.com/docs/extensions",
+    keywords: ["chrome extension", "manifest v3", "mv3", "content script", "background script", "service worker", "extension api"]
+  },
+  {
+    id: "chrome-side-panel",
+    title: "Chrome Side Panel API",
+    source: "Chrome for Developers",
+    url: "https://developer.chrome.com/docs/extensions/reference/api/sidePanel",
+    keywords: ["side panel", "sidepanel", "chrome side panel", "side panel api"]
+  },
+  {
+    id: "react",
+    title: "React Docs",
+    source: "React",
+    url: "https://react.dev/learn",
+    keywords: ["react", "component", "usestate", "useeffect", "props", "jsx", "tsx"]
+  },
+  {
+    id: "typescript",
+    title: "TypeScript Docs",
+    source: "TypeScript",
+    url: "https://www.typescriptlang.org/docs/",
+    keywords: ["typescript", "type", "interface", "tsx", "generic", "enum"]
+  },
+  {
+    id: "tailwind",
+    title: "Tailwind CSS Docs",
+    source: "Tailwind CSS",
+    url: "https://tailwindcss.com/docs",
+    keywords: ["tailwind", "tailwind css", "utility class", "classname", "responsive class"]
+  },
+  {
+    id: "vite",
+    title: "Vite Docs",
+    source: "Vite",
+    url: "https://vite.dev/guide/",
+    keywords: ["vite", "dev server", "build tool", "vite config"]
+  },
+  {
+    id: "git",
+    title: "Git Documentation",
+    source: "Git",
+    url: "https://git-scm.com/doc",
+    keywords: ["git", "commit", "branch", "merge", "pull request", "push", "clone"]
+  },
+  {
+    id: "github",
+    title: "GitHub Docs",
+    source: "GitHub",
+    url: "https://docs.github.com/",
+    keywords: ["github", "repository", "repo", "pull request", "issue", "actions", "github actions"]
+  },
+  {
+    id: "nodejs",
+    title: "Node.js Docs",
+    source: "Node.js",
+    url: "https://nodejs.org/docs/latest/api/",
+    keywords: ["node", "nodejs", "node.js", "npm", "package.json"]
+  },
+  {
+    id: "supabase",
+    title: "Supabase Docs",
+    source: "Supabase",
+    url: "https://supabase.com/docs",
+    keywords: ["supabase", "auth", "database", "postgres", "rls"]
+  }
 ];
 
 const stopWords = new Set([
@@ -308,6 +398,73 @@ function getKeyPoints() {
   const points = getImportantSentences(pageText, keywords).slice(0, 5);
 
   return points.length ? points : getPageReview().summary;
+}
+
+function findOfficialDocs(text) {
+  const normalized = String(text ?? "").toLowerCase();
+  const seen = new Set();
+
+  return officialDocs
+    .map((doc) => {
+      const matchedKeywords = [...new Set(doc.keywords.filter((keyword) => normalized.includes(keyword.toLowerCase())))];
+      return { ...doc, matchedKeywords, score: matchedKeywords.length };
+    })
+    .filter((doc) => doc.score > 0 && !seen.has(doc.id) && seen.add(doc.id))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 4);
+}
+
+function getMustReadDocs() {
+  const text = `${getLessonTopic()} ${getPageTextForIdeas()}`;
+  const matchedDocs = findOfficialDocs(text);
+  if (matchedDocs.length) return matchedDocs.slice(0, 3);
+
+  return [
+    {
+      id: "claude-code",
+      title: "Claude Code Official Docs",
+      source: "Anthropic",
+      url: "https://docs.anthropic.com/en/docs/claude-code/overview",
+      matchedKeywords: ["project help"],
+      score: 1
+    },
+    {
+      id: "github",
+      title: "GitHub Docs",
+      source: "GitHub",
+      url: "https://docs.github.com/",
+      matchedKeywords: ["build workflow"],
+      score: 1
+    }
+  ];
+}
+
+function buildSimpleExplanation(text, context = {}) {
+  const cleanText = String(text || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const heading = context.nearestHeading ? ` near "${context.nearestHeading}"` : "";
+
+  if (!cleanText) {
+    return "Kito needs a specific line or visible lesson text before it can explain this properly.";
+  }
+
+  const shortText = cleanText.length > 180 ? `${cleanText.slice(0, 177)}...` : cleanText;
+  return `This line${heading} is saying: ${shortText} Break it into three checks: what concept is named, what action you should take, and what result proves it worked. If a tool or framework appears here, open the official docs before copying code.`;
+}
+
+function renderMustReadDocsHtml(docs = getMustReadDocs()) {
+  return `
+    <div class="must-read-docs">
+      <div class="review-title">Must-read official docs</div>
+      ${docs.map((doc) => `
+        <a class="must-doc" href="${escapeHtml(doc.url)}" target="_blank" rel="noopener noreferrer">
+          <strong>${escapeHtml(doc.title)}</strong>
+          <span>${escapeHtml(doc.source)}</span>
+        </a>
+      `).join("")}
+    </div>
+  `;
 }
 
 function getProjectIdeas() {
@@ -567,64 +724,59 @@ function createCourseNotesPdfData(courseRecord) {
   };
   const lessons = getSortedLessons(course);
   const page = [];
-  const detailPages = [];
+  const notesPage = [];
 
   page.push("0.98 1 0.93 rg 0 0 612 792 re f");
   page.push(pdfText("BuildClub Course Notes", 48, 742, 22, "0.04 0.11 0.07"));
   page.push(pdfText(wrapPdfText(course.title, 58), 48, 714, 13, "0.18 0.36 0.09"));
   page.push(pdfText(`${lessons.length} completed ${lessons.length === 1 ? "lesson" : "lessons"}`, 48, 692, 10, "0.30 0.42 0.18"));
-  page.push(pdfText("Learning flow", 48, 662, 13, "0.04 0.11 0.07"));
+  page.push(pdfText("Learning flow - page 1 of 2", 48, 662, 13, "0.04 0.11 0.07"));
 
-  const flowLessons = lessons.slice(0, 7);
-  let y = 596;
+  const flowLessons = lessons.slice(0, 9);
+  let y = 604;
   flowLessons.forEach((lesson, index) => {
     const lines = wrapPdfText(lesson.title, 48).slice(0, 2);
-    const boxHeight = 54;
+    const boxHeight = 44;
 
     page.push(pdfBox(84, y, 444, boxHeight, "0.93 0.98 0.78", "0.37 0.59 0.14"));
-    page.push(pdfText(`${index + 1}`, 103, y + 32, 16, "0.04 0.11 0.07"));
-    page.push(pdfText(lines, 132, y + 34, 12, "0.12 0.24 0.08"));
-    page.push(pdfText(new Date(lesson.completedAt).toLocaleDateString(), 132, y + 13, 9, "0.30 0.42 0.18"));
+    page.push(pdfText(`${index + 1}`, 103, y + 26, 15, "0.04 0.11 0.07"));
+    page.push(pdfText(lines, 132, y + 27, 11, "0.12 0.24 0.08"));
+    page.push(pdfText(new Date(lesson.completedAt).toLocaleDateString(), 132, y + 11, 8, "0.30 0.42 0.18"));
 
     if (index < flowLessons.length - 1) {
-      page.push(pdfArrowDown(306, y - 8, y - 28));
+      page.push(pdfArrowDown(306, y - 6, y - 18));
     }
 
-    y -= boxHeight + 36;
+    y -= boxHeight + 25;
   });
 
   if (lessons.length > flowLessons.length) {
-    page.push(pdfText(`+ ${lessons.length - flowLessons.length} more lessons in detailed notes`, 210, 72, 10, "0.30 0.42 0.18"));
+    page.push(pdfText(`+ ${lessons.length - flowLessons.length} more lessons are compressed into the notes page`, 162, 48, 10, "0.30 0.42 0.18"));
   }
 
-  lessons.forEach((lesson, lessonIndex) => {
-    const detail = [];
-    detail.push("0.98 1 0.93 rg 0 0 612 792 re f");
-    detail.push(pdfText(`Lesson ${lessonIndex + 1}`, 48, 742, 13, "0.30 0.42 0.18"));
-    detail.push(pdfText(wrapPdfText(lesson.title, 58), 48, 718, 18, "0.04 0.11 0.07"));
-    detail.push(pdfText("Key points", 48, 672, 12, "0.04 0.11 0.07"));
+  notesPage.push("0.98 1 0.93 rg 0 0 612 792 re f");
+  notesPage.push(pdfText("Compact Course Notes - page 2 of 2", 48, 742, 18, "0.04 0.11 0.07"));
+  notesPage.push(pdfText(wrapPdfText(course.title, 62), 48, 714, 12, "0.18 0.36 0.09"));
 
-    let noteY = 608;
-    (lesson.summary ?? []).slice(0, 5).forEach((point, pointIndex) => {
-      const lines = wrapPdfText(point, 60).slice(0, 4);
-      const boxHeight = Math.max(58, 24 + lines.length * 14);
-      detail.push(pdfBox(54, noteY, 504, boxHeight, pointIndex % 2 ? "0.96 0.99 0.86" : "0.92 0.98 0.78", "0.37 0.59 0.14"));
-      detail.push(pdfText(`Point ${pointIndex + 1}`, 74, noteY + boxHeight - 20, 10, "0.30 0.42 0.18"));
-      detail.push(pdfText(lines, 74, noteY + boxHeight - 38, 11, "0.12 0.24 0.08"));
-      noteY -= boxHeight + 18;
-    });
+  let noteY = 668;
+  lessons.slice(0, 8).forEach((lesson, lessonIndex) => {
+    const point = (lesson.summary ?? [])[0] || "Review this lesson and connect it to one build step.";
+    const idea = lesson.ideas?.[0] || "Create a small project from this lesson.";
+    const lines = wrapPdfText(`${lessonIndex + 1}. ${lesson.title}: ${point}`, 78).slice(0, 3);
+    const ideaLines = wrapPdfText(`Build: ${idea}`, 78).slice(0, 2);
+    const boxHeight = 54 + lines.length * 9 + ideaLines.length * 8;
 
-    const idea = lesson.ideas?.[0];
-    if (idea) {
-      const ideaLines = wrapPdfText(`Next build: ${idea}`, 68).slice(0, 3);
-      detail.push(pdfBox(54, 58, 504, 64, "0.90 0.96 0.76", "0.22 0.44 0.10"));
-      detail.push(pdfText(ideaLines, 74, 94, 11, "0.12 0.24 0.08"));
-    }
-
-    detailPages.push(detail.join("\n"));
+    notesPage.push(pdfBox(44, noteY - boxHeight + 18, 524, boxHeight, lessonIndex % 2 ? "0.96 0.99 0.86" : "0.92 0.98 0.78", "0.37 0.59 0.14"));
+    notesPage.push(pdfText(lines, 64, noteY, 10, "0.12 0.24 0.08"));
+    notesPage.push(pdfText(ideaLines, 64, noteY - 38, 9, "0.30 0.42 0.18"));
+    noteY -= boxHeight + 10;
   });
 
-  return buildPdf([page.join("\n"), ...detailPages]);
+  if (lessons.length > 8) {
+    notesPage.push(pdfText(`Remaining ${lessons.length - 8} lessons are saved in Kito memory. Re-open course notes for the full on-page flow.`, 64, 54, 9, "0.30 0.42 0.18"));
+  }
+
+  return buildPdf([page.join("\n"), notesPage.join("\n")]);
 }
 
 function triggerPdfDownload(pdf, filenameBase) {
@@ -649,6 +801,226 @@ async function downloadNotesPdf() {
     }
   };
   triggerPdfDownload(createCourseNotesPdfData(fallbackRecord), `${fallbackRecord.title}-notes`);
+}
+
+function getCertificateCandidate() {
+  const selectors = [
+    "a[href*='certificate' i]",
+    "a[href*='cert' i]",
+    "a[download]",
+    "img[src*='certificate' i]",
+    "img[alt*='certificate' i]",
+    "canvas"
+  ];
+
+  for (const selector of selectors) {
+    const element = document.querySelector(selector);
+    if (!element || element.closest(`#${widgetId}, #${finalCourseCardModalId}`)) continue;
+
+    if (element.tagName === "A" && element.href) {
+      return { type: "link", url: element.href };
+    }
+
+    if (element.tagName === "IMG" && element.src) {
+      return { type: "image", url: element.src };
+    }
+
+    if (element.tagName === "CANVAS") {
+      try {
+        return { type: "image", url: element.toDataURL("image/png") };
+      } catch (_error) {
+        return null;
+      }
+    }
+  }
+
+  return null;
+}
+
+function downloadUrl(url, filename) {
+  if (!url) return false;
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  return true;
+}
+
+async function createNotesObjectUrl(courseRecord) {
+  const pdf = createCourseNotesPdfData(courseRecord);
+  const blob = new Blob([pdf], { type: "application/pdf" });
+  return URL.createObjectURL(blob);
+}
+
+function showFinalCourseCard({ courseRecord, notesUrl, certificateUrl }) {
+  document.getElementById(finalCourseCardModalId)?.remove();
+  const lessons = getSortedLessons(courseRecord);
+  const firstIdea = lessons.find((lesson) => lesson.ideas?.[0])?.ideas?.[0] || "Build a project from this course.";
+  const modal = document.createElement("div");
+  modal.id = finalCourseCardModalId;
+  modal.innerHTML = `
+    <div class="bc-final-backdrop" data-final-close="true"></div>
+    <section class="bc-final-card" role="dialog" aria-modal="true" aria-label="BuildClub completion card">
+      <button class="bc-final-close" data-final-close="true" aria-label="Close">×</button>
+      <div class="bc-final-kicker">Written member of BuildClub</div>
+      <h2>${escapeHtml(courseRecord.title)}</h2>
+      <p>Kito saved your short notes, certificate, and project idea in one completion card.</p>
+      <div class="bc-final-grid">
+        <a href="${escapeHtml(notesUrl)}" download="${escapeHtml(courseRecord.slug || "buildclub-course")}-notes.pdf">Short notes</a>
+        ${certificateUrl ? `<a href="${escapeHtml(certificateUrl)}" download="${escapeHtml(courseRecord.slug || "buildclub-course")}-certificate">Certificate</a>` : `<span>No certificate file found</span>`}
+      </div>
+      <div class="bc-final-note">
+        <strong>Project help</strong>
+        <span>${escapeHtml(firstIdea)}</span>
+      </div>
+      <div class="bc-final-footer">BuildClub Builder Card • Member verified by course completion</div>
+    </section>
+  `;
+
+  const style = document.createElement("style");
+  style.textContent = `
+    #${finalCourseCardModalId} {
+      position: fixed;
+      inset: 0;
+      z-index: 2147483647;
+      display: grid;
+      place-items: center;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #102014;
+    }
+
+    #${finalCourseCardModalId} .bc-final-backdrop {
+      position: absolute;
+      inset: 0;
+      background: rgba(8, 18, 11, 0.58);
+      backdrop-filter: blur(10px);
+    }
+
+    #${finalCourseCardModalId} .bc-final-card {
+      position: relative;
+      width: min(460px, calc(100vw - 32px));
+      border: 1px solid rgba(95, 151, 35, 0.36);
+      border-radius: 18px;
+      background: #fbfff0;
+      padding: 24px;
+      box-shadow: 0 30px 90px rgba(0, 0, 0, 0.34);
+    }
+
+    #${finalCourseCardModalId} .bc-final-close {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      width: 30px;
+      height: 30px;
+      border: 0;
+      border-radius: 999px;
+      background: #102014;
+      color: #c8ea5a;
+      font-size: 20px;
+      cursor: pointer;
+    }
+
+    #${finalCourseCardModalId} .bc-final-kicker,
+    #${finalCourseCardModalId} .bc-final-footer {
+      color: #4c6b24;
+      font-size: 11px;
+      font-weight: 950;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+    }
+
+    #${finalCourseCardModalId} h2 {
+      margin: 10px 0 0;
+      font-size: 30px;
+      line-height: 1.05;
+    }
+
+    #${finalCourseCardModalId} p {
+      color: #40513b;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    #${finalCourseCardModalId} .bc-final-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    #${finalCourseCardModalId} .bc-final-grid a,
+    #${finalCourseCardModalId} .bc-final-grid span {
+      display: grid;
+      place-items: center;
+      min-height: 56px;
+      border: 1px solid rgba(95, 151, 35, 0.34);
+      border-radius: 10px;
+      background: #ffffff;
+      color: #102014;
+      font-size: 13px;
+      font-weight: 950;
+      text-align: center;
+      text-decoration: none;
+    }
+
+    #${finalCourseCardModalId} .bc-final-note {
+      display: grid;
+      gap: 5px;
+      margin-top: 14px;
+      border-radius: 10px;
+      background: #edf8c7;
+      padding: 12px;
+    }
+
+    #${finalCourseCardModalId} .bc-final-note strong {
+      font-size: 12px;
+    }
+
+    #${finalCourseCardModalId} .bc-final-note span {
+      color: #29451d;
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    #${finalCourseCardModalId} .bc-final-footer {
+      margin-top: 16px;
+    }
+  `;
+
+  modal.appendChild(style);
+  modal.addEventListener("click", (event) => {
+    if (event.target.closest("[data-final-close]")) {
+      modal.remove();
+      setTimeout(() => URL.revokeObjectURL(notesUrl), 1000);
+    }
+  });
+  document.body.appendChild(modal);
+}
+
+async function handleCertificateCompletion({ force = false } = {}) {
+  if (hasShownCertificateCard && !force) return;
+  const pageSignal = `${document.title} ${document.body?.innerText ?? ""}`.toLowerCase();
+  if (!force && !/certificate|congratulations|course complete|completed course|finished the course/.test(pageSignal)) {
+    return;
+  }
+
+  hasShownCertificateCard = true;
+  const courseRecord = await saveCompletedLesson();
+  courseRecord.completed = true;
+  const memory = await getCourseMemory();
+  memory[getCourseInfo().key] = courseRecord;
+  await storageSet({ [courseMemoryKey]: memory });
+
+  const certificate = getCertificateCandidate();
+  if (certificate?.url && !sessionStorage.getItem("kitoCertificateDownloaded")) {
+    downloadUrl(certificate.url, `${courseRecord.slug || "buildclub-course"}-certificate`);
+    sessionStorage.setItem("kitoCertificateDownloaded", "true");
+  }
+
+  const notesUrl = await createNotesObjectUrl(courseRecord);
+  showFinalCourseCard({ courseRecord, notesUrl, certificateUrl: certificate?.url || "" });
 }
 
 function storageGet(key) {
@@ -946,8 +1318,8 @@ function showStuckHelpBubble(context) {
   }
 
   bubble.innerHTML = `
-    <div class="kito-stuck-title">Need help here?</div>
-    <div class="kito-stuck-hint">${escapeHtml(context.nearestHeading || "Kito noticed this section might need a closer look.")}</div>
+    <div class="kito-stuck-title">Want help here?</div>
+    <div class="kito-stuck-hint">${escapeHtml(context.nearestHeading || "Copy-paste the exact line you did not understand. I will explain it with official docs.")}</div>
     <div class="kito-stuck-actions">
       <button type="button" data-action="kito-explain">Explain</button>
       <button type="button" data-action="kito-docs">Official Docs</button>
@@ -968,6 +1340,116 @@ async function triggerStuckDetected(triggerReason, selectedText = "") {
 
   await saveStuckContext(context);
   showStuckHelpBubble(context);
+}
+
+function injectSelectionExplainStyle() {
+  if (document.getElementById(`${selectionExplainBoxId}-style`)) return;
+
+  const style = document.createElement("style");
+  style.id = `${selectionExplainBoxId}-style`;
+  style.textContent = `
+    #${selectionExplainBoxId} {
+      position: fixed;
+      z-index: 2147483647;
+      width: min(340px, calc(100vw - 24px));
+      border: 1px solid rgba(95, 151, 35, 0.48);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.96);
+      color: #102014;
+      box-shadow: 0 18px 44px rgba(16, 32, 20, 0.2);
+      padding: 12px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      pointer-events: auto;
+    }
+
+    #${selectionExplainBoxId} .selection-title {
+      color: #4c6b24;
+      font-size: 10px;
+      font-weight: 950;
+      letter-spacing: 0.7px;
+      text-transform: uppercase;
+    }
+
+    #${selectionExplainBoxId} .selection-copy {
+      margin-top: 6px;
+      color: #263c20;
+      font-size: 12px;
+      font-weight: 800;
+      line-height: 1.45;
+    }
+
+    #${selectionExplainBoxId} .selection-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-top: 10px;
+    }
+
+    #${selectionExplainBoxId} button,
+    #${selectionExplainBoxId} a {
+      border: 0;
+      border-radius: 8px;
+      background: #102014;
+      color: #c8ea5a;
+      padding: 8px 9px;
+      font: inherit;
+      font-size: 11px;
+      font-weight: 950;
+      line-height: 1.1;
+      text-decoration: none;
+      cursor: pointer;
+    }
+
+    #${selectionExplainBoxId} button[data-selection-close] {
+      border: 1px solid rgba(95, 151, 35, 0.34);
+      background: #f5f8ed;
+      color: #28441e;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+function getSelectionRect() {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return null;
+
+  const range = selection.getRangeAt(0);
+  const rects = [...range.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0);
+  return rects[rects.length - 1] || range.getBoundingClientRect();
+}
+
+async function showSelectionExplainBox(selectedText, context) {
+  const rect = getSelectionRect();
+  if (!rect) return;
+
+  injectSelectionExplainStyle();
+  const docs = findOfficialDocs(`${selectedText} ${context.nearestHeading || ""} ${context.nearbyText || ""}`);
+  const firstDoc = docs[0] || getMustReadDocs()[0];
+  const box = document.getElementById(selectionExplainBoxId) || document.createElement("div");
+  box.id = selectionExplainBoxId;
+  box.innerHTML = `
+    <div class="selection-title">Kito explains selected lines</div>
+    <div class="selection-copy">${escapeHtml(buildSimpleExplanation(selectedText, context))}</div>
+    <div class="selection-actions">
+      <button type="button" data-selection-action="panel">Detailed help</button>
+      ${firstDoc ? `<a href="${escapeHtml(firstDoc.url)}" target="_blank" rel="noopener noreferrer">Official docs</a>` : ""}
+      <button type="button" data-selection-close="true">Close</button>
+    </div>
+  `;
+
+  if (!box.parentElement) document.body.appendChild(box);
+  const boxWidth = Math.min(340, window.innerWidth - 24);
+  const left = Math.max(12, Math.min(window.innerWidth - boxWidth - 12, rect.left));
+  const topBelow = rect.bottom + 10;
+  const top = topBelow + 150 < window.innerHeight ? topBelow : Math.max(12, rect.top - 168);
+  box.style.left = `${left}px`;
+  box.style.top = `${top}px`;
+
+  box.querySelector("[data-selection-action='panel']")?.addEventListener("click", async () => {
+    await saveStuckContext(context);
+    await openKitoPanel("Explain");
+  });
+  box.querySelector("[data-selection-close]")?.addEventListener("click", () => box.remove());
 }
 
 function resetSameZoneTimer() {
@@ -1492,6 +1974,7 @@ function renderCourseNotes(widget, courseRecord) {
           </section>
         `).join("")}
       </div>
+      ${renderMustReadDocsHtml()}
     </div>
     <button class="kito-primary" data-action="review-current">Review this lesson</button>
     <button class="kito-secondary" data-action="download-notes-pdf">Download completed notes PDF</button>
@@ -1522,6 +2005,7 @@ function renderWidgetState(widget, state) {
   if (state === "hello") {
     setBubbleContent(widget, `
       <div class="kito-message">Hey, I am Kito. Open the course and read along. I will come back when you finish.</div>
+      ${renderMustReadDocsHtml()}
       <button class="kito-primary" data-action="show-course-notes">Course notes</button>
       <button class="kito-secondary" data-action="show-progress-card">Progress card</button>
       <button class="kito-secondary" data-action="show-translate">Translate page</button>
@@ -1548,9 +2032,12 @@ function renderWidgetState(widget, state) {
         <ul class="review-list">
           ${review.summary.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
         </ul>
+        ${renderMustReadDocsHtml()}
       </div>
       <button class="kito-primary" data-action="show-quiz">Take quick quiz</button>
+      <button class="kito-secondary" data-action="start-building">Project help</button>
       <button class="kito-secondary" data-action="download-notes-pdf">Download completed notes PDF</button>
+      <button class="kito-secondary" data-action="final-course-card">Final card</button>
       <button class="kito-secondary" data-action="show-translate">Translate page</button>
     `);
     return;
@@ -1919,6 +2406,34 @@ function createBuildClubWidget({ toggle = true } = {}) {
       padding-right: 2px;
     }
 
+    #${widgetId} .must-read-docs {
+      display: grid;
+      gap: 7px;
+      margin-top: 10px;
+    }
+
+    #${widgetId} .must-doc {
+      display: grid;
+      gap: 2px;
+      border: 1px solid rgba(95, 151, 35, 0.44);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.58);
+      color: #1f3d16;
+      padding: 8px;
+      text-decoration: none;
+    }
+
+    #${widgetId} .must-doc strong {
+      font-size: 12px;
+      line-height: 1.2;
+    }
+
+    #${widgetId} .must-doc span {
+      color: #4c6b24;
+      font-size: 10px;
+      font-weight: 850;
+    }
+
     #${widgetId} .flow-chart {
       display: grid;
       gap: 8px;
@@ -2202,6 +2717,11 @@ function createBuildClubWidget({ toggle = true } = {}) {
       return;
     }
 
+    if (action === "final-course-card") {
+      handleCertificateCompletion({ force: true }).catch(() => {});
+      return;
+    }
+
     if (action === "start-building") {
       renderWidgetState(widget, "has-idea");
       return;
@@ -2314,6 +2834,9 @@ function trackSelectionSignal() {
 
   if (selectedText.length <= 20 || selectedText === lastSelectedText) return;
   lastSelectedText = selectedText;
+  const context = buildStuckContext("text-selected", selectedText);
+  saveStuckContext(context).catch(() => {});
+  showSelectionExplainBox(selectedText, context).catch(() => {});
   triggerStuckDetected("text-selected", selectedText);
 }
 
@@ -2429,4 +2952,5 @@ createBuildClubWidget({ toggle: false });
 resetSameZoneTimer();
 resetCodePauseTimer();
 trackReadingProgress();
+handleCertificateCompletion().catch(() => {});
 }
